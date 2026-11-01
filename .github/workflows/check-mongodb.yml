@@ -1,0 +1,55 @@
+name: Check MongoDB connection
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  connection:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Install MongoDB driver
+        run: python -m pip install pymongo==4.19.0 dnspython==2.9.1
+      - name: Check authentication without displaying credentials
+        env:
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+        run: |
+          python - <<'PY'
+          import os
+          from pymongo import MongoClient
+          from pymongo.errors import ConfigurationError, InvalidURI, OperationFailure, ServerSelectionTimeoutError
+
+          uri = os.environ.get('MONGODB_URI', '')
+          if not uri:
+              raise SystemExit('Save MONGODB_URI as a production environment secret first.')
+          client = None
+          try:
+              client = MongoClient(uri, serverSelectionTimeoutMS=15000, connectTimeoutMS=10000)
+              client.admin.command('ping')
+              print('MongoDB connection and authentication succeeded.')
+              # Read-only command: does not create databases, users, collections or documents.
+              status = client.admin.command('connectionStatus', showPrivileges=False)
+              if not status.get('authInfo', {}).get('authenticatedUsers'):
+                  raise SystemExit('Server responded without an authenticated user. Check credentials in MONGODB_URI.')
+              print('An authenticated database user was confirmed. No app data was changed.')
+          except OperationFailure as error:
+              if error.code == 18:
+                  raise SystemExit('MongoDB rejected the credentials. Check the database username, password, and URL encoding.') from None
+              raise SystemExit('MongoDB rejected the connection/status command. Check database user permissions.') from None
+          except ServerSelectionTimeoutError:
+              raise SystemExit('Could not reach MongoDB. Check Atlas Network Access, cluster status, and the URI hostname.') from None
+          except (ConfigurationError, InvalidURI):
+              raise SystemExit('MongoDB URI or DNS configuration is invalid. Check the Atlas driver connection string and URL encoding.') from None
+          except Exception as error:
+              raise SystemExit('MongoDB check failed: ' + type(error).__name__ + '. Credential values were not printed.') from None
+          finally:
+              if client:
+                  client.close()
+          PY
