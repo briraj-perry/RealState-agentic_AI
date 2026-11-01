@@ -29,7 +29,8 @@ jobs:
       - name: Start disposable MongoDB replica set
         run: |
           trap 'status=$?; if [ "$status" -ne 0 ]; then docker logs --tail 80 estate-mongo; docker inspect estate-mongo --format="{{json .State}}"; fi' EXIT
-          docker run -d --name estate-mongo -p 27017:27017 mongo:8.0 --replSet rs0 --bind_ip_all
+          # MongoDB 8.0.34 refuses newer runner kernels (SERVER-121912/SERVER-131779).
+          docker run -d --name estate-mongo -p 27017:27017 mongo:9.0.4 --replSet rs0 --bind_ip_all
           for attempt in $(seq 1 30); do
             if docker exec estate-mongo mongosh --quiet --eval 'db.adminCommand({ping:1})'; then break; fi
             if [ "$(docker inspect estate-mongo --format='{{.State.Running}}')" != true ]; then exit 1; fi

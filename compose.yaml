@@ -1,7 +1,7 @@
 # Local development only. Port is bound to loopback, never public internet.
 services:
   mongodb:
-    image: mongo:8.0
+    image: mongo:9.0.4
     command: [mongod, --replSet, rs0, --bind_ip_all]
     ports: ['127.0.0.1:27017:27017']
     volumes: [estate_mongo:/data/db]

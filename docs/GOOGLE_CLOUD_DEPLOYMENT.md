@@ -129,6 +129,10 @@ Push to main, or Actions → **Deploy Google Cloud Run → Run workflow**. CI st
 disposable MongoDB replica set on the GitHub runner and runs the real application
 suite, concurrency/transaction tests, and a Docker HTTP smoke test. It creates no
 test resources on Google Cloud. Pull requests run CI without deployment credentials.
+The disposable CI/local Docker database uses MongoDB 9.0.4 because MongoDB 8.0.34
+refuses current Linux runner kernels. The application suite also passed against
+MongoDB 8.0.34 on Windows; an Atlas cluster does not need a major-version upgrade
+for this app. See [the runner compatibility issue](https://github.com/actions/runner-images/issues/15005).
 
 The deploy job runs only after CI succeeds. It builds the image on the GitHub runner,
 pushes the commit-SHA image to Artifact Registry, and deploys Cloud Run. Missing config

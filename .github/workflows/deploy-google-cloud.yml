@@ -52,17 +52,6 @@ jobs:
             exit 1
           fi
           echo "IMAGE=$GCP_REGION-docker.pkg.dev/$GCP_PROJECT_ID/$ARTIFACT_REPOSITORY/$CLOUD_RUN_SERVICE:$GITHUB_SHA" >> "$GITHUB_ENV"
-      - uses: google-github-actions/auth@v3
-        with:
-          project_id: ${{ env.GCP_PROJECT_ID }}
-          workload_identity_provider: ${{ env.WIF_PROVIDER }}
-          service_account: ${{ env.DEPLOY_SERVICE_ACCOUNT }}
-      - uses: google-github-actions/setup-gcloud@v3
-      - name: Build and push revision image
-        run: |
-          gcloud auth configure-docker "$GCP_REGION-docker.pkg.dev" --quiet
-          docker build --tag "$IMAGE" .
-          docker push "$IMAGE"
       - name: Write runtime configuration privately
         env:
           MONGODB_URI: ${{ secrets.MONGODB_URI }}
@@ -91,6 +80,17 @@ jobs:
           path.write_text(json.dumps(config))
           path.chmod(0o600)
           PY
+      - uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Build and push revision image
+        run: |
+          gcloud auth configure-docker "$GCP_REGION-docker.pkg.dev" --quiet
+          docker build --tag "$IMAGE" .
+          docker push "$IMAGE"
       - name: Deploy minimal app container
         run: |
           gcloud run deploy "$CLOUD_RUN_SERVICE" --project="$GCP_PROJECT_ID" --region="$GCP_REGION" \
