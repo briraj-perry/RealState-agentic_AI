@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: estate
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: estate_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_POSTGRES_URL: postgresql+psycopg://estate:ci-only-password@localhost:5432/estate_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install locked dependencies
+        run: |
+          python -m pip install -r requirements.lock
+          python -m pip install --no-deps -e .
+      - name: Lint and test
+        run: |
+          ruff check .
+          ruff format --check .
+          node --check estate_ai/web/app.js
+          pytest -q
+      - name: Build and smoke test container
+        run: |
+          docker build -t estate-ai:ci .
+          docker run -d --name estate-ci -p 8080:8080 \
+            -e WORKER_ENABLED=false -e WHATSAPP_MODE=simulate estate-ai:ci
+          trap 'docker logs estate-ci; docker rm -f estate-ci' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://localhost:8080/health; then
+              curl --fail --silent http://localhost:8080/ > /dev/null
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1

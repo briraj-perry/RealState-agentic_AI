@@ -29,7 +29,6 @@ def create_app(settings=None, factory=None, agent=None, whatsapp=None):
         app.state.worker = Worker(app.state.factory, settings, agent, whatsapp)
         task = None
         if settings.worker_enabled:
-            app.state.worker.recover()
             task = asyncio.create_task(app.state.worker.run())
         yield
         if task:

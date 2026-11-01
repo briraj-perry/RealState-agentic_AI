@@ -1,4 +1,7 @@
 .env
+.env.*
+!.env.example
+gha-creds-*.json
 .venv/
 .uv-cache/
 .test-tmp*/

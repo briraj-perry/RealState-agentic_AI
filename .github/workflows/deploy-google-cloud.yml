@@ -1,0 +1,108 @@
+name: Deploy Google Cloud Run
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloud-run-production
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    needs: checks
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_REGION: ${{ vars.GCP_REGION || 'asia-south1' }}
+      ARTIFACT_REPOSITORY: ${{ vars.ARTIFACT_REPOSITORY || 'estate-ai' }}
+      CLOUD_RUN_SERVICE: ${{ vars.CLOUD_RUN_SERVICE || 'estate-ai' }}
+      RUNTIME_SERVICE_ACCOUNT: ${{ vars.RUNTIME_SERVICE_ACCOUNT }}
+      CLOUD_SQL_CONNECTION_NAME: ${{ vars.CLOUD_SQL_CONNECTION_NAME }}
+      WIF_PROVIDER: ${{ vars.WIF_PROVIDER }}
+      DEPLOY_SERVICE_ACCOUNT: ${{ vars.DEPLOY_SERVICE_ACCOUNT }}
+      OLLAMA_BASE_URL: ${{ vars.OLLAMA_BASE_URL || 'https://ollama.com' }}
+      OLLAMA_MODEL: ${{ vars.OLLAMA_MODEL || 'gemma4:31b' }}
+      WHATSAPP_MODE: ${{ vars.WHATSAPP_MODE || 'simulate' }}
+      WHATSAPP_PHONE_NUMBER_ID: ${{ vars.WHATSAPP_PHONE_NUMBER_ID }}
+      WHATSAPP_GRAPH_VERSION: ${{ vars.WHATSAPP_GRAPH_VERSION }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate configuration
+        shell: bash
+        run: |
+          for key in GCP_PROJECT_ID RUNTIME_SERVICE_ACCOUNT CLOUD_SQL_CONNECTION_NAME WIF_PROVIDER DEPLOY_SERVICE_ACCOUNT; do
+            if [ -z "${!key}" ]; then
+              echo "::error::Set production environment variable $key. See docs/GOOGLE_CLOUD_DEPLOYMENT.md."
+              exit 1
+            fi
+          done
+          if [ "$WHATSAPP_MODE" = live ] && { [ -z "$WHATSAPP_PHONE_NUMBER_ID" ] || [ -z "$WHATSAPP_GRAPH_VERSION" ]; }; then
+            echo '::error::Live mode requires WHATSAPP_PHONE_NUMBER_ID and WHATSAPP_GRAPH_VERSION.'
+            exit 1
+          fi
+          echo "IMAGE=$GCP_REGION-docker.pkg.dev/$GCP_PROJECT_ID/$ARTIFACT_REPOSITORY/$CLOUD_RUN_SERVICE:$GITHUB_SHA" >> "$GITHUB_ENV"
+      - uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Build and push revision image
+        run: |
+          gcloud auth configure-docker "$GCP_REGION-docker.pkg.dev" --quiet
+          docker build --tag "$IMAGE" .
+          docker push "$IMAGE"
+      - name: Deploy
+        id: deploy
+        uses: google-github-actions/deploy-cloudrun@v3
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+          service: ${{ env.CLOUD_RUN_SERVICE }}
+          region: ${{ env.GCP_REGION }}
+          image: ${{ env.IMAGE }}
+          env_vars_update_strategy: overwrite
+          env_vars: |
+            OLLAMA_BASE_URL=${{ env.OLLAMA_BASE_URL }}
+            OLLAMA_MODEL=${{ env.OLLAMA_MODEL }}
+            WHATSAPP_MODE=${{ env.WHATSAPP_MODE }}
+            WHATSAPP_PHONE_NUMBER_ID=${{ env.WHATSAPP_PHONE_NUMBER_ID }}
+            WHATSAPP_GRAPH_VERSION=${{ env.WHATSAPP_GRAPH_VERSION }}
+            WORKER_ENABLED=true
+            ALLOW_DEMO_DATA=false
+          secrets_update_strategy: overwrite
+          secrets: |
+            DATABASE_URL=estate-ai-database-url:latest
+            ADMIN_API_KEY=estate-ai-admin-key:latest
+            OLLAMA_API_KEY=estate-ai-ollama-key:latest
+            WHATSAPP_ACCESS_TOKEN=estate-ai-whatsapp-token:latest
+            WHATSAPP_APP_SECRET=estate-ai-whatsapp-app-secret:latest
+            WHATSAPP_VERIFY_TOKEN=estate-ai-whatsapp-verify-token:latest
+          flags: >-
+            --service-account=${{ env.RUNTIME_SERVICE_ACCOUNT }}
+            --add-cloudsql-instances=${{ env.CLOUD_SQL_CONNECTION_NAME }}
+            --allow-unauthenticated
+            --execution-environment=gen2
+            --no-cpu-throttling
+            --min-instances=1
+            --max-instances=1
+            --cpu=1
+            --memory=1Gi
+            --timeout=300
+      - name: Check deployed health
+        env:
+          SERVICE_URL: ${{ steps.deploy.outputs.url }}
+        run: |
+          curl --fail --retry 8 --retry-all-errors --retry-delay 5 "$SERVICE_URL/health"
+          printf 'Dashboard: %s\nMeta callback: %s/webhooks/whatsapp\n' "$SERVICE_URL" "$SERVICE_URL" >> "$GITHUB_STEP_SUMMARY"

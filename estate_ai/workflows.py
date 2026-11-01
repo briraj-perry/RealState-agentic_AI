@@ -52,7 +52,7 @@ def enqueue(factory, event_id: str, phone: str, text: str, channel: str, timesta
 
 
 class Worker:
-    """Durable single-worker inbox/outbox. Run exactly one API process in this milestone."""
+    """Durable inbox/outbox; PostgreSQL elects one active worker across revisions."""
 
     def __init__(self, factory, settings, agent=None, whatsapp=None):
         self.factory = factory
@@ -166,7 +166,36 @@ class Worker:
             session.commit()
 
     async def run(self):
+        with self.factory() as session:
+            engine = session.get_bind()
+        if engine.dialect.name != "postgresql":
+            # SQLite development still requires a single API process.
+            await self._run_active()
+            return
         while True:
+            try:
+                # Dedicated session-level advisory lock, never returned to a pool while held.
+                # This also serializes recovery when old/new Cloud Run revisions overlap.
+                with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+                    while not connection.exec_driver_sql("SELECT pg_try_advisory_lock(845921730)").scalar():
+                        await asyncio.sleep(2)
+                    try:
+                        await self._run_active(connection)
+                    finally:
+                        if not connection.invalidated:
+                            connection.exec_driver_sql("SELECT pg_advisory_unlock(845921730)")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - Re-elect after a database connection failure.
+                log.warning("Worker leadership interrupted (%s)", type(exc).__name__)
+                await asyncio.sleep(2)
+
+    async def _run_active(self, leadership_connection=None):
+        self.recover()
+        while True:
+            if leadership_connection is not None:
+                # Fail closed before starting more work if the lock connection is lost.
+                leadership_connection.exec_driver_sql("SELECT 1")
             try:
                 await self.tick()
             except asyncio.CancelledError:

@@ -1,0 +1,8 @@
+*
+!Dockerfile
+!pyproject.toml
+!requirements.prod.lock
+!estate_ai/
+!estate_ai/**
+**/__pycache__
+**/*.pyc

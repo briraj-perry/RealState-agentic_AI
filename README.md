@@ -257,3 +257,9 @@ Provider references: [Ollama cloud](https://docs.ollama.com/cloud),
 [Ollama chat API](https://docs.ollama.com/api/chat),
 [LangGraph](https://docs.langchain.com/oss/python/langgraph/quickstart),
 [WhatsApp developer hub](https://business.whatsapp.com/developers/developer-hub).
+
+## Google Cloud deployment
+
+GitHub Actions CI/CD, a production Docker image, Cloud SQL persistence and Secret
+Manager integration are included. Follow [the deployment guide](docs/GOOGLE_CLOUD_DEPLOYMENT.md)
+to configure your Google Cloud project and GitHub `production` environment.
