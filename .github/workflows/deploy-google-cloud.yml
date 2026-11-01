@@ -97,7 +97,7 @@ jobs:
             --image="$IMAGE" --service-account="$RUNTIME_SERVICE_ACCOUNT" \
             --env-vars-file="$RUNNER_TEMP/estate-runtime.json" \
             --allow-unauthenticated --execution-environment=gen2 --no-cpu-throttling \
-            --min-instances=1 --max-instances=1 --cpu=1 --memory=512Mi --concurrency=2 --timeout=300 --quiet
+            --min=1 --max=1 --max-instances=1 --cpu=1 --memory=512Mi --concurrency=2 --timeout=300 --quiet
           SERVICE_URL="$(gcloud run services describe "$CLOUD_RUN_SERVICE" --project="$GCP_PROJECT_ID" \
             --region="$GCP_REGION" --format='value(status.url)')"
           echo "SERVICE_URL=$SERVICE_URL" >> "$GITHUB_ENV"
