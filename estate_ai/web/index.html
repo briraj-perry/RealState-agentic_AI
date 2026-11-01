@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#17342f">
+  <title>Estate AI · Agent workspace</title>
+  <meta name="description" content="Your real estate agent workspace: conversations, inventory and agent testing.">
+  <link rel="stylesheet" href="/assets/styles.css?v=inventory-import-1">
+  <script src="/assets/app.js?v=inventory-import-1" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a href="#overview" class="brand"><span class="brand-mark">E<span>↗</span></span><span>estate<span class="brand-ai">ai</span><small>YOUR SALES CO-PILOT</small></span></a>
+      <div class="workspace-label"><span class="workspace-avatar">ER</span><div><strong>Realty workspace</strong><small>Local development</small></div><span class="workspace-dots">···</span></div>
+      <div class="nav-caption">WORKSPACE</div>
+      <nav aria-label="Main navigation" id="navigation"></nav>
+      <div class="sidebar-bottom"><div class="agent-state"><span class="status-dot"></span><strong>Built for better conversations</strong><p>Let your agent handle the first hello. You take it from there.</p></div><button class="profile" id="lock-workspace"><span class="avatar">AD</span><span><strong>Workspace admin</strong><small>Lock workspace ↗</small></span></button></div>
+    </aside>
+    <div class="main-shell">
+      <header class="topbar"><div class="breadcrumb">Workspace <span>/</span> <strong id="breadcrumb">Overview</strong></div><div class="topbar-actions"><span class="badge neutral"><span class="tiny-dot"></span>Local workspace</span><button class="icon-button" id="refresh" aria-label="Refresh workspace" title="Refresh workspace">↻</button><span class="avatar small">AD</span></div></header>
+      <main id="content" tabindex="-1"></main>
+      <footer>Estate AI <span>Thoughtful conversations. Better connections.</span><span class="footer-right">Asia / Kolkata</span></footer>
+    </div>
+  </div>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <dialog id="property-dialog"><form id="property-form"><div class="dialog-heading"><div><span class="eyebrow">YOUR INVENTORY</span><h2 id="property-form-title">Add a property</h2></div><button type="button" class="icon-button" id="close-property" aria-label="Close property form">×</button></div><p class="muted">Your agent uses these details when recommending a home. Add only information you have verified.</p><div class="form-grid">
+    <label>Property ID<input name="id" required maxlength="64" placeholder="MOH-001"></label><label>Property title<input name="title" required maxlength="200" placeholder="3 BHK apartment in Sector 70"></label>
+    <label>City<input name="city" required maxlength="80" placeholder="Mohali"></label><label>Locality<input name="locality" maxlength="120" placeholder="Sector 70"></label>
+    <label>Bedrooms<input name="bedrooms" type="number" min="0" max="30" required value="3"></label><label>Asking price · INR<input name="asking_price" type="number" min="1" max="2000000000" required placeholder="8500000"><small>Enter rupees. ₹85 lakh = 8500000.</small></label>
+    <label class="full-width">Description<textarea name="description" rows="3" maxlength="6000" placeholder="Verified features, amenities and details…"></textarea></label>
+    <label class="check-label full-width"><input name="available" type="checkbox" checked> Available for enquiries</label>
+    <label class="check-label full-width"><input name="demo" type="checkbox"> Fictional demo property · for testing only</label>
+    <label class="full-width">Property photos<input id="property-photo-input" type="file" accept="image/jpeg,image/png,image/webp" multiple><small>Choose up to 10 photos. JPEG, PNG or WebP · up to 8 MB each. Photos are saved with the property.</small></label>
+    <div class="full-width photo-previews" id="photo-previews"></div><p class="full-width muted text-small" id="photo-upload-status" aria-live="polite"></p>
+    <div class="full-width" id="property-extra-details"></div>
+  </div><p id="property-error" class="error-text" role="alert"></p><div class="dialog-footer"><button type="button" class="button secondary" id="cancel-property">Cancel</button><button type="submit" class="button primary" id="save-property">Save property ↗</button></div></form></dialog>
+  <dialog id="template-dialog"><div class="dialog-heading"><div><span class="eyebrow">FICTIONAL SAMPLE INVENTORY</span><h2>Start with a property template</h2></div><button class="icon-button" id="close-templates" aria-label="Close property templates">×</button></div><p class="muted text-small">Sample details and prices are invented for testing. Templates always remain labelled as fictional demo inventory.</p><div id="template-list" class="template-list"></div></dialog>
+  <dialog id="import-dialog"><div class="dialog-heading"><div><span class="eyebrow">BULK INVENTORY</span><h2>Import inventory from Excel</h2></div><button class="icon-button" id="close-import" aria-label="Close inventory import">×</button></div><p class="muted text-small">Upload BIBA’s inventory, review the columns, then import the rows you approve. Existing photos stay attached to matching property IDs.</p><div class="import-upload"><label>Choose an Excel or CSV sheet<input type="file" id="inventory-sheet-upload" accept=".xlsx,.csv"><small>.xlsx or UTF-8 .csv · up to 8 MB and 2,000 data rows per sheet</small></label><button type="button" class="button secondary" id="download-import-template">Download column template</button></div><p class="text-small muted" id="import-status" aria-live="polite"></p><div id="import-mapping"></div><p id="import-error" class="error-text" role="alert"></p><div id="import-preview"></div><div class="dialog-footer"><label class="check-label" id="skip-invalid-label" hidden><input type="checkbox" id="skip-invalid-import"> Import valid rows only; skip rows with errors</label><button class="button primary" id="commit-import" disabled>Import reviewed rows ↗</button></div></dialog>
+  <dialog id="login-dialog"><form id="login-form"><span class="brand-mark">E<span>↗</span></span><span class="eyebrow">WELCOME TO YOUR WORKSPACE</span><h1>A little closer to<br>your next conversation.</h1><p class="muted">Unlock Estate AI with the admin key from your local <code>.env</code> file.</p><label>Admin API key<input id="admin-key" type="password" autocomplete="current-password" required placeholder="Enter ADMIN_API_KEY" autofocus></label><p id="login-error" class="error-text" role="alert"></p><button class="button primary" type="submit">Open workspace <span>↗</span></button><p class="login-note">Your key stays in this browser tab’s session. It is never placed in a URL.</p></form></dialog>
+</body>
+</html>
