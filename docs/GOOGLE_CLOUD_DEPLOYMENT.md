@@ -25,6 +25,14 @@ Do not paste personal access tokens into Git remotes or commit `.env`.
 
 ## 2. Create cloud resources once
 
+For AILearning (`gen-lang-client-0081910278`), a concrete identity/registry setup is
+available in `scripts/setup-google-cloud-identity.sh`. Review its IAM grants before
+running it in Cloud Shell. It trusts only this repository's numeric ID/owner ID,
+main branch and production environment, and grants Artifact Registry writes only
+on the Estate AI repository. It does not create the database or store credentials.
+Use this script instead of the manual identity/OIDC commands in sections 2–3;
+its pool name is `estate-ai-github`, so use the provider path it prints.
+
 Create/select a Google Cloud project and enable billing. Cloud SQL and the always-on
 Cloud Run worker incur charges even while idle; this configuration does not scale
 to zero because the current app processes durable jobs in a background loop.
