@@ -67,6 +67,8 @@ repository, and the `estate-ai-github` Workload Identity pool/provider. It gives
 - Runtime identity: no Cloud SQL, Secret Manager or other project-level data roles.
 - GitHub trust: only repository ID `1441703959`, owner ID `304775270`, main branch,
   and the production environment. No downloadable service-account keys are created.
+  The subject uses GitHub's immutable format for this repository:
+  `repo:briraj-perry@304775270/RealState-agentic_AI@1441703959:environment:production`.
 
 The script is idempotent for its own named resources. It refuses to silently change
 the condition on a preexisting provider. It does not delete other project resources,

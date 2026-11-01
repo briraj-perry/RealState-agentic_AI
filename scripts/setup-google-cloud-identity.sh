@@ -41,7 +41,8 @@ gcloud iam service-accounts add-iam-policy-binding "$RUNTIME_SA" \
 if ! gcloud iam workload-identity-pools describe estate-ai-github --location=global >/dev/null 2>&1; then
   gcloud iam workload-identity-pools create estate-ai-github --location=global --display-name='Estate AI GitHub'
 fi
-condition="assertion.repository_id == '$REPOSITORY_ID' && assertion.repository_owner_id == '$OWNER_ID' && assertion.ref == 'refs/heads/main' && assertion.sub == 'repo:$REPOSITORY:environment:production'"
+subject="repo:briraj-perry@$OWNER_ID/RealState-agentic_AI@$REPOSITORY_ID:environment:production"
+condition="assertion.repository_id == '$REPOSITORY_ID' && assertion.repository_owner_id == '$OWNER_ID' && assertion.ref == 'refs/heads/main' && assertion.sub == '$subject'"
 if ! gcloud iam workload-identity-pools providers describe github \
   --workload-identity-pool=estate-ai-github --location=global >/dev/null 2>&1; then
   gcloud iam workload-identity-pools providers create-oidc github --location=global \
