@@ -29,7 +29,6 @@ jobs:
       ARTIFACT_REPOSITORY: ${{ vars.ARTIFACT_REPOSITORY || 'estate-ai' }}
       CLOUD_RUN_SERVICE: ${{ vars.CLOUD_RUN_SERVICE || 'estate-ai' }}
       RUNTIME_SERVICE_ACCOUNT: ${{ vars.RUNTIME_SERVICE_ACCOUNT }}
-      CLOUD_SQL_CONNECTION_NAME: ${{ vars.CLOUD_SQL_CONNECTION_NAME }}
       WIF_PROVIDER: ${{ vars.WIF_PROVIDER }}
       DEPLOY_SERVICE_ACCOUNT: ${{ vars.DEPLOY_SERVICE_ACCOUNT }}
       OLLAMA_BASE_URL: ${{ vars.OLLAMA_BASE_URL || 'https://ollama.com' }}
@@ -42,7 +41,7 @@ jobs:
       - name: Validate configuration
         shell: bash
         run: |
-          for key in GCP_PROJECT_ID RUNTIME_SERVICE_ACCOUNT CLOUD_SQL_CONNECTION_NAME WIF_PROVIDER DEPLOY_SERVICE_ACCOUNT; do
+          for key in GCP_PROJECT_ID RUNTIME_SERVICE_ACCOUNT WIF_PROVIDER DEPLOY_SERVICE_ACCOUNT; do
             if [ -z "${!key}" ]; then
               echo "::error::Set production environment variable $key. See docs/GOOGLE_CLOUD_DEPLOYMENT.md."
               exit 1
@@ -64,45 +63,48 @@ jobs:
           gcloud auth configure-docker "$GCP_REGION-docker.pkg.dev" --quiet
           docker build --tag "$IMAGE" .
           docker push "$IMAGE"
-      - name: Deploy
-        id: deploy
-        uses: google-github-actions/deploy-cloudrun@v3
-        with:
-          project_id: ${{ env.GCP_PROJECT_ID }}
-          service: ${{ env.CLOUD_RUN_SERVICE }}
-          region: ${{ env.GCP_REGION }}
-          image: ${{ env.IMAGE }}
-          env_vars_update_strategy: overwrite
-          env_vars: |
-            OLLAMA_BASE_URL=${{ env.OLLAMA_BASE_URL }}
-            OLLAMA_MODEL=${{ env.OLLAMA_MODEL }}
-            WHATSAPP_MODE=${{ env.WHATSAPP_MODE }}
-            WHATSAPP_PHONE_NUMBER_ID=${{ env.WHATSAPP_PHONE_NUMBER_ID }}
-            WHATSAPP_GRAPH_VERSION=${{ env.WHATSAPP_GRAPH_VERSION }}
-            WORKER_ENABLED=true
-            ALLOW_DEMO_DATA=false
-          secrets_update_strategy: overwrite
-          secrets: |
-            DATABASE_URL=estate-ai-database-url:latest
-            ADMIN_API_KEY=estate-ai-admin-key:latest
-            OLLAMA_API_KEY=estate-ai-ollama-key:latest
-            WHATSAPP_ACCESS_TOKEN=estate-ai-whatsapp-token:latest
-            WHATSAPP_APP_SECRET=estate-ai-whatsapp-app-secret:latest
-            WHATSAPP_VERIFY_TOKEN=estate-ai-whatsapp-verify-token:latest
-          flags: >-
-            --service-account=${{ env.RUNTIME_SERVICE_ACCOUNT }}
-            --add-cloudsql-instances=${{ env.CLOUD_SQL_CONNECTION_NAME }}
-            --allow-unauthenticated
-            --execution-environment=gen2
-            --no-cpu-throttling
-            --min-instances=1
-            --max-instances=1
-            --cpu=1
-            --memory=1Gi
-            --timeout=300
-      - name: Check deployed health
+      - name: Write runtime configuration privately
         env:
-          SERVICE_URL: ${{ steps.deploy.outputs.url }}
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          MONGODB_DATABASE: ${{ vars.MONGODB_DATABASE || 'estate_ai' }}
+          ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+          OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+          WHATSAPP_ACCESS_TOKEN: ${{ secrets.WHATSAPP_ACCESS_TOKEN }}
+          WHATSAPP_APP_SECRET: ${{ secrets.WHATSAPP_APP_SECRET }}
+          WHATSAPP_VERIFY_TOKEN: ${{ secrets.WHATSAPP_VERIFY_TOKEN }}
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          required = ['MONGODB_URI', 'ADMIN_API_KEY', 'OLLAMA_API_KEY']
+          if os.environ['WHATSAPP_MODE'] == 'live':
+              required += ['WHATSAPP_ACCESS_TOKEN', 'WHATSAPP_APP_SECRET', 'WHATSAPP_VERIFY_TOKEN']
+          missing = [key for key in required if not os.environ.get(key)]
+          if missing:
+              raise SystemExit('Missing GitHub production secrets: ' + ', '.join(missing))
+          keys = ['MONGODB_URI', 'MONGODB_DATABASE', 'ADMIN_API_KEY', 'OLLAMA_BASE_URL', 'OLLAMA_MODEL',
+                  'OLLAMA_API_KEY', 'WHATSAPP_MODE', 'WHATSAPP_PHONE_NUMBER_ID', 'WHATSAPP_GRAPH_VERSION',
+                  'WHATSAPP_ACCESS_TOKEN', 'WHATSAPP_APP_SECRET', 'WHATSAPP_VERIFY_TOKEN']
+          config = {key: os.environ.get(key, '') for key in keys}
+          config.update(WORKER_ENABLED='true', ALLOW_DEMO_DATA='false')
+          path = Path(os.environ['RUNNER_TEMP']) / 'estate-runtime.json'
+          path.write_text(json.dumps(config))
+          path.chmod(0o600)
+          PY
+      - name: Deploy minimal app container
+        run: |
+          gcloud run deploy "$CLOUD_RUN_SERVICE" --project="$GCP_PROJECT_ID" --region="$GCP_REGION" \
+            --image="$IMAGE" --service-account="$RUNTIME_SERVICE_ACCOUNT" \
+            --env-vars-file="$RUNNER_TEMP/estate-runtime.json" \
+            --allow-unauthenticated --execution-environment=gen2 --no-cpu-throttling \
+            --min-instances=1 --max-instances=1 --cpu=1 --memory=512Mi --concurrency=2 --timeout=300 --quiet
+          SERVICE_URL="$(gcloud run services describe "$CLOUD_RUN_SERVICE" --project="$GCP_PROJECT_ID" \
+            --region="$GCP_REGION" --format='value(status.url)')"
+          echo "SERVICE_URL=$SERVICE_URL" >> "$GITHUB_ENV"
+      - name: Remove temporary runtime configuration
+        if: always()
+        run: rm -f "$RUNNER_TEMP/estate-runtime.json"
+      - name: Check deployed health
         run: |
           curl --fail --retry 8 --retry-all-errors --retry-delay 5 "$SERVICE_URL/health"
           printf 'Dashboard: %s\nMeta callback: %s/webhooks/whatsapp\n' "$SERVICE_URL" "$SERVICE_URL" >> "$GITHUB_STEP_SUMMARY"

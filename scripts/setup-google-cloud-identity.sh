@@ -17,7 +17,7 @@ actual_number="$(gcloud projects describe "$PROJECT_ID" --format='value(projectN
 test "$actual_number" = "$PROJECT_NUMBER"
 
 gcloud services enable run.googleapis.com artifactregistry.googleapis.com \
-  sqladmin.googleapis.com secretmanager.googleapis.com iam.googleapis.com \
+  iam.googleapis.com \
   iamcredentials.googleapis.com sts.googleapis.com --quiet
 
 for name in estate-ai-deploy estate-ai-runtime; do
@@ -37,8 +37,6 @@ gcloud artifacts repositories add-iam-policy-binding estate-ai --location="$REGI
   --member="serviceAccount:$DEPLOY_SA" --role=roles/artifactregistry.writer --quiet
 gcloud iam service-accounts add-iam-policy-binding "$RUNTIME_SA" \
   --member="serviceAccount:$DEPLOY_SA" --role=roles/iam.serviceAccountUser --quiet
-gcloud projects add-iam-policy-binding "$PROJECT_ID" --quiet --condition=None \
-  --member="serviceAccount:$RUNTIME_SA" --role=roles/cloudsql.client
 
 if ! gcloud iam workload-identity-pools describe estate-ai-github --location=global >/dev/null 2>&1; then
   gcloud iam workload-identity-pools create estate-ai-github --location=global --display-name='Estate AI GitHub'
@@ -64,4 +62,4 @@ gcloud iam service-accounts add-iam-policy-binding "$DEPLOY_SA" \
 printf '\nGitHub production variables:\n'
 printf 'DEPLOY_SERVICE_ACCOUNT=%s\nRUNTIME_SERVICE_ACCOUNT=%s\n' "$DEPLOY_SA" "$RUNTIME_SA"
 printf 'WIF_PROVIDER=projects/%s/locations/global/workloadIdentityPools/estate-ai-github/providers/github\n' "$PROJECT_NUMBER"
-printf '\nNext: create Cloud SQL and configure only the app-specific Secret Manager values.\n'
+printf '\nNext: add MongoDB Atlas and app credentials to GitHub production secrets.\n'

@@ -5,9 +5,9 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from langgraph.graph import END, START, StateGraph
-from sqlalchemy import or_, select
 
 from estate_ai.db import Audit, Message, Proposal
+from estate_ai.document_query import or_, select
 from estate_ai.schemas import HandoffArgs
 from estate_ai.tools import ToolService, tool_definitions
 

@@ -2,10 +2,9 @@ import json
 from datetime import UTC, datetime, timedelta
 
 from pydantic import BaseModel, ValidationError
-from sqlalchemy import select
-from sqlalchemy.orm import load_only, object_session
 
 from estate_ai.db import Audit, Customer, Property, PropertyMetadata, PropertyPhoto, Proposal, now
+from estate_ai.document_query import load_only, object_session, select
 from estate_ai.photos import photo_data
 from estate_ai.schemas import (
     HandoffArgs,

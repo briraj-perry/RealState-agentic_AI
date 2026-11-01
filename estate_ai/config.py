@@ -10,7 +10,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     admin_api_key: SecretStr = SecretStr("")
-    database_url: str = "sqlite:///./estate.db"
+    mongodb_uri: SecretStr = SecretStr("mongodb://127.0.0.1:27017/?replicaSet=rs0")
+    mongodb_database: str = Field(default="estate_ai", pattern=r"^[a-zA-Z0-9_-]{1,63}$")
     business_name: str = "Estate AI Realty"
     allow_demo_data: bool = False
     ollama_base_url: str = "http://localhost:11434"

@@ -17,6 +17,8 @@ def test_auth_simulator_and_takeover(factory, settings):
     with TestClient(create_app(settings, factory)) as client:
         assert client.get("/api/status").status_code == 401
         status = client.get("/api/status", headers=HEADERS).json()
+        assert status["database"] == "MongoDB"
+        assert "mongodb_uri" not in status
         assert status["model"] == "gemma4:31b-cloud"
         assert status["ollama_base_url"] == "http://localhost:11434"
         assert status["ollama_configured"]

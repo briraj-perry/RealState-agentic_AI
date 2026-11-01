@@ -18,9 +18,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
 from pydantic import Field, ValidationError
-from sqlalchemy import select
 
 from estate_ai.db import Audit, InventoryImport, Property, PropertyMetadata, now
+from estate_ai.document_query import select
 from estate_ai.schemas import PropertyInput, StrictModel
 
 MAX_FILE_BYTES = 8 * 1024 * 1024

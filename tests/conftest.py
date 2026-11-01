@@ -1,3 +1,6 @@
+import os
+from uuid import uuid4
+
 import pytest
 
 from estate_ai.config import Settings
@@ -12,5 +15,12 @@ def settings():
 
 
 @pytest.fixture
-def factory(tmp_path):
-    return connect("sqlite:///" + str(tmp_path / "test.db"))
+def factory():
+    uri = os.environ.get("TEST_MONGODB_URI", "mongodb://127.0.0.1:27019/?replicaSet=rs0")
+    # Unique disposable test database; never use the app's configured database.
+    result = connect(uri, "estate_test_" + uuid4().hex)
+    try:
+        yield result
+    finally:
+        result.client.drop_database(result.database.name)
+        result.close()

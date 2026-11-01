@@ -10,21 +10,8 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_USER: estate
-          POSTGRES_PASSWORD: ci-only-password
-          POSTGRES_DB: estate_test
-        ports: ['5432:5432']
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
     env:
-      TEST_POSTGRES_URL: postgresql+psycopg://estate:ci-only-password@localhost:5432/estate_test
+      TEST_MONGODB_URI: mongodb://127.0.0.1:27017/?replicaSet=rs0
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -39,6 +26,15 @@ jobs:
         run: |
           python -m pip install -r requirements.lock
           python -m pip install --no-deps -e .
+      - name: Start disposable MongoDB replica set
+        run: |
+          docker run -d --name estate-mongo -p 27017:27017 mongo:8.0 --replSet rs0 --bind_ip_all
+          for attempt in $(seq 1 30); do
+            if docker exec estate-mongo mongosh --quiet --eval 'db.adminCommand({ping:1})'; then break; fi
+            sleep 2
+          done
+          docker exec estate-mongo mongosh --quiet --eval 'rs.initiate({_id:"rs0",members:[{_id:0,host:"127.0.0.1:27017"}]})'
+          python -c 'import os; from pymongo import MongoClient; MongoClient(os.environ["TEST_MONGODB_URI"], serverSelectionTimeoutMS=30000).admin.command("ping")'
       - name: Lint and test
         run: |
           ruff check .
@@ -48,7 +44,8 @@ jobs:
       - name: Build and smoke test container
         run: |
           docker build -t estate-ai:ci .
-          docker run -d --name estate-ci -p 8080:8080 \
+          docker run -d --name estate-ci --network host \
+            -e MONGODB_URI="$TEST_MONGODB_URI" -e MONGODB_DATABASE=estate_smoke \
             -e WORKER_ENABLED=false -e WHATSAPP_MODE=simulate estate-ai:ci
           trap 'docker logs estate-ci; docker rm -f estate-ci' EXIT
           for attempt in $(seq 1 30); do

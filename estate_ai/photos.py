@@ -1,4 +1,4 @@
-"""Validated, private property photos stored in the existing SQL database."""
+"""Validated, private property photos stored in MongoDB."""
 
 import hashlib
 import warnings
@@ -6,9 +6,9 @@ from io import BytesIO
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from PIL import Image, ImageOps, UnidentifiedImageError
-from sqlalchemy import func, select
 
 from estate_ai.db import Property, PropertyPhoto
+from estate_ai.document_query import func, select
 
 MAX_BYTES = 8 * 1024 * 1024
 MAX_PHOTOS = 10

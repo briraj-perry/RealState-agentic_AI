@@ -1,192 +1,182 @@
-# Google Cloud CI/CD
+# Cloud Run hosting + MongoDB Atlas
 
-Pushes to `main` run lint, SQLite tests, a real PostgreSQL worker-election test,
-and a Docker build/HTTP smoke test. Deployment runs only after those checks pass.
-Pull requests run CI without cloud credentials. Manual deployment is also available
-under Actions → Deploy Google Cloud Run → Run workflow.
+Project: **AILearning**, ID `gen-lang-client-0081910278`, Mumbai `asia-south1`.
+Repository: `briraj-perry/RealState-agentic_AI`.
 
-The target is Cloud Run + Cloud SQL PostgreSQL + Artifact Registry + Secret Manager.
-GitHub uses Workload Identity Federation (OIDC); no Google service-account JSON key
-is stored in GitHub. The container excludes `.env`, databases, imports, tests and Git.
+## Services and resource limits
 
-## 1. GitHub access
-
-The remote is `https://github.com/briraj-perry/RealState-agentic_AI.git`.
-The previously selected `sinny777` account returned HTTP 403. Sign in as an account
-with write access, or have the owner grant that account collaborator access first:
-
-```powershell
-gh auth login --hostname github.com --git-protocol https --web
-gh auth setup-git
-git push -u origin main
-```
-
-Do not paste personal access tokens into Git remotes or commit `.env`.
-
-## 2. Create cloud resources once
-
-For AILearning (`gen-lang-client-0081910278`), a concrete identity/registry setup is
-available in `scripts/setup-google-cloud-identity.sh`. Review its IAM grants before
-running it in Cloud Shell. It trusts only this repository's numeric ID/owner ID,
-main branch and production environment, and grants Artifact Registry writes only
-on the Estate AI repository. It does not create the database or store credentials.
-Use this script instead of the manual identity/OIDC commands in sections 2–3;
-its pool name is `estate-ai-github`, so use the provider path it prints.
-
-Create/select a Google Cloud project and enable billing. Cloud SQL and the always-on
-Cloud Run worker incur charges even while idle; this configuration does not scale
-to zero because the current app processes durable jobs in a background loop.
-The workflow does not create or delete databases automatically.
-
-Use **Google Cloud Shell (Bash)** for the commands below. Replace the project ID.
-Choose the region before creating resources; the example uses Mumbai.
-
-```bash
-export PROJECT_ID='YOUR_GOOGLE_CLOUD_PROJECT_ID'
-export REGION='asia-south1'
-export REPO='briraj-perry/RealState-agentic_AI'
-gcloud config set project "$PROJECT_ID"
-gcloud services enable run.googleapis.com artifactregistry.googleapis.com \
-  sqladmin.googleapis.com secretmanager.googleapis.com iam.googleapis.com \
-  iamcredentials.googleapis.com sts.googleapis.com
-
-gcloud artifacts repositories create estate-ai --repository-format=docker --location="$REGION"
-gcloud iam service-accounts create estate-ai-deploy
-gcloud iam service-accounts create estate-ai-runtime
-export DEPLOY_SA="estate-ai-deploy@$PROJECT_ID.iam.gserviceaccount.com"
-export RUNTIME_SA="estate-ai-runtime@$PROJECT_ID.iam.gserviceaccount.com"
-for role in roles/run.admin roles/artifactregistry.writer; do
-  gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-    --member="serviceAccount:$DEPLOY_SA" --role="$role"
-done
-gcloud iam service-accounts add-iam-policy-binding "$RUNTIME_SA" \
-  --member="serviceAccount:$DEPLOY_SA" --role=roles/iam.serviceAccountUser
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:$RUNTIME_SA" --role=roles/cloudsql.client
-```
-
-Create a **PostgreSQL 17 Cloud SQL instance** in the same region using the console.
-Select the instance size, availability and automated backup/PITR settings appropriate
-to your budget. Enable its public IP for the Cloud Run managed Unix socket connection;
-you do not need an `0.0.0.0/0` authorized network. Use second-generation Cloud Run as
-configured by the workflow. Create a database named `estate_ai` and a database user
-with permissions to create/update tables in that database. Record the instance
-connection name, such as `PROJECT_ID:asia-south1:estate-ai-db`.
-
-The app creates missing tables on startup. Existing local SQLite listings, images,
-conversations and import history are **not automatically migrated**. Back up data
-and review schema compatibility before future upgrades; `create_all` is not a
-schema migration tool.
-
-## 3. Configure GitHub OIDC
-
-```bash
-export PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
-gcloud iam workload-identity-pools create github --location=global --display-name='GitHub Actions'
-gcloud iam workload-identity-pools providers create-oidc github \
-  --location=global --workload-identity-pool=github \
-  --issuer-uri='https://token.actions.githubusercontent.com' \
-  --attribute-mapping='google.subject=assertion.sub,attribute.repository=assertion.repository' \
-  --attribute-condition="assertion.repository == '$REPO' && assertion.ref == 'refs/heads/main'"
-gcloud iam service-accounts add-iam-policy-binding "$DEPLOY_SA" \
-  --role=roles/iam.workloadIdentityUser \
-  --member="principalSet://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/github/attribute.repository/$REPO"
-```
-
-For an organization-managed deployment, additionally constrain the provider to
-GitHub's immutable `repository_id` and `repository_owner_id` claims to protect
-against repository/owner name reuse. Never trust all GitHub repositories.
-
-## 4. Add Secret Manager values
-
-In Google Cloud Console → **Secret Manager**, create these secrets. Add their values
-privately in the console; do not put credentials in GitHub workflow files or shell history.
-
-| Secret ID | Value |
+| Component | Location/purpose |
 | --- | --- |
-| `estate-ai-database-url` | `postgresql+psycopg://USER:URL_ENCODED_PASSWORD@/estate_ai?host=/cloudsql/PROJECT:REGION:INSTANCE` |
-| `estate-ai-admin-key` | A long random dashboard API key |
-| `estate-ai-ollama-key` | API key for the remote Ollama endpoint |
-| `estate-ai-whatsapp-token` | Meta access token |
-| `estate-ai-whatsapp-app-secret` | Meta app secret |
-| `estate-ai-whatsapp-verify-token` | Your separate random webhook verification secret |
+| Cloud Run | One app container, 1 vCPU, 512 MiB, maximum 1 instance, concurrency 2 |
+| Artifact Registry | The container image needed for deployment; built on GitHub runners |
+| IAM / Workload Identity Federation | Keyless GitHub authentication and the app's runtime identity |
+| MongoDB Atlas | All inventory, photos, conversations, proposals, jobs, imports and audit records |
+| GitHub Actions secrets | Runtime credentials injected into the Cloud Run revision |
+| Ollama Cloud | External LLM endpoint; no model runs on Google Cloud |
 
-All six secret IDs must exist. While using simulation, unconfigured WhatsApp secrets
-can contain `unused-in-simulation`; replace every placeholder before enabling live mode.
-For live use, replace the temporary Meta token with an appropriately scoped long-lived
-token. Secret values are resolved at container startup; deploy again after rotation.
+The pipeline does **not** provision or use Cloud SQL, Firestore, Google Secret Manager,
+Cloud Storage buckets, Redis, Pub/Sub, Cloud Tasks, Cloud Scheduler, Cloud Build, VPC
+connectors or Cloud NAT. Cloud Run's platform networking and standard runtime logging
+still exist; a literal zero-dependency Cloud Run service is not possible. No Google
+database is used. Atlas can be hosted on AWS if you want the database outside GCP entirely.
 
-Grant access only to these secrets:
+The existing background worker needs continuously allocated CPU and minimum **one**
+instance. This is a small, single-instance configuration, **not scale-to-zero/free
+hosting**. Scaling to zero safely requires a different request/job execution design.
+Both Cloud Run and image storage can incur charges. Model and Atlas limits are separate.
+Choose billing alerts before leaving the app running. See [Cloud Run pricing](https://cloud.google.com/run/pricing).
 
-```bash
-for name in database-url admin-key ollama-key whatsapp-token whatsapp-app-secret whatsapp-verify-token; do
-  gcloud secrets add-iam-policy-binding "estate-ai-$name" \
-    --member="serviceAccount:$RUNTIME_SA" --role=roles/secretmanager.secretAccessor
-done
-```
+## 1. MongoDB Atlas setup
 
-The deployed container cannot use Ollama at your PC's `localhost:11434`.
-The initial cloud configuration uses native Ollama Cloud (`https://ollama.com`,
-`gemma4:31b`), requiring its API key. You can change the model/endpoint variables;
-the existing agent expects an Ollama-compatible native `/api/chat` API with tools.
-Other vendors require an adapter rather than just changing the URL. Your local
-`.env` and `gemma4:31b-cloud` configuration remain unchanged.
+1. Sign in at [MongoDB Atlas](https://cloud.mongodb.com/). Check whether an existing
+   organization/project already contains a cluster before creating another.
+2. For initial testing, select the **Free** cluster option if available in the chosen
+   region. Choose AWS as the provider to keep database hosting outside Google Cloud.
+   Review the current cluster summary before creation; do not accidentally select a paid tier.
+3. Create a database user restricted to `readWrite` on the `estate_ai` database.
+   Set a strong unique password yourself. This is distinct from your Atlas website login.
+4. Under **Connect → Drivers → Python**, copy the `mongodb+srv://...` connection string
+   privately, replace the password placeholder with its URL-encoded value, and retain
+   `retryWrites=true&w=majority`. Never paste credentials into this chat or the repository.
+5. Configure **Network Access** so the app can reach Atlas. Cloud Run's default outbound
+   addresses are dynamic. A strict fixed-IP allowlist needs additional networking services,
+   which this minimal deployment intentionally does not create. Allowing all IPs in Atlas
+   is an explicit security tradeoff: TLS, a strong restricted database user, credential
+   rotation and monitoring remain necessary. Do not broaden an existing production
+   cluster's allowlist without reviewing that effect; use a separate test cluster instead.
 
-## 5. Set GitHub environment variables
+Use Atlas or a MongoDB replica set: the app requires multi-document transactions.
+It refuses a standalone server. Photos are stored in MongoDB itself, so monitor your
+cluster's storage limits. A large spreadsheet that exceeds MongoDB's per-document
+limit returns HTTP 413; split it into smaller files. No cloud photo storage is created.
 
-Repository → Settings → Environments → create **production** → Environment variables.
+References: [Atlas free cluster setup](https://www.mongodb.com/docs/atlas/tutorial/deploy-free-tier-cluster/),
+[free cluster limits](https://www.mongodb.com/docs/atlas/reference/free-shared-limitations/),
+[PyMongo transactions](https://www.mongodb.com/docs/languages/python/pymongo-driver/current/crud/transactions/).
+
+## 2. Create the hosting identities/registry
+
+Billing must already be enabled for AILearning. In **Google Cloud Shell (Bash)**,
+review and run the repository's `scripts/setup-google-cloud-identity.sh`.
+
+It creates `estate-ai-deploy`, `estate-ai-runtime`, the Mumbai `estate-ai` image
+repository, and the `estate-ai-github` Workload Identity pool/provider. It gives:
+
+- Deploy identity: Cloud Run admin in this project, image writer only on the Estate AI
+  registry, and permission to act as the runtime identity.
+- Runtime identity: no Cloud SQL, Secret Manager or other project-level data roles.
+- GitHub trust: only repository ID `1441703959`, owner ID `304775270`, main branch,
+  and the production environment. No downloadable service-account keys are created.
+
+The script is idempotent for its own named resources. It refuses to silently change
+the condition on a preexisting provider. It does not delete other project resources,
+create a database, change database credentials, or copy local `.env` values.
+
+APIs enabled earlier in setup do not imply resources were created. The prior Cloud SQL
+plan was cancelled before provisioning. The revised setup no longer enables SQL or
+Secret Manager APIs, and this pipeline never calls them. Existing unrelated Firebase
+resources in AILearning are left alone.
+
+## 3. GitHub production configuration
+
+Repository → **Settings → Environments → production**. Restrict deployment branches
+to main; optionally enable required reviewers. Set these environment variables:
 
 | Variable | Value |
 | --- | --- |
-| `GCP_PROJECT_ID` | Your Google Cloud project ID |
-| `GCP_REGION` | `asia-south1` (default) |
-| `WIF_PROVIDER` | `projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github/providers/github` |
-| `DEPLOY_SERVICE_ACCOUNT` | `estate-ai-deploy@PROJECT_ID.iam.gserviceaccount.com` |
-| `RUNTIME_SERVICE_ACCOUNT` | `estate-ai-runtime@PROJECT_ID.iam.gserviceaccount.com` |
-| `CLOUD_SQL_CONNECTION_NAME` | `PROJECT_ID:asia-south1:INSTANCE_NAME` |
+| `GCP_PROJECT_ID` | `gen-lang-client-0081910278` |
+| `GCP_REGION` | `asia-south1` |
+| `WIF_PROVIDER` | `projects/879940632641/locations/global/workloadIdentityPools/estate-ai-github/providers/github` |
+| `DEPLOY_SERVICE_ACCOUNT` | `estate-ai-deploy@gen-lang-client-0081910278.iam.gserviceaccount.com` |
+| `RUNTIME_SERVICE_ACCOUNT` | `estate-ai-runtime@gen-lang-client-0081910278.iam.gserviceaccount.com` |
 | `ARTIFACT_REPOSITORY` | `estate-ai` (default) |
 | `CLOUD_RUN_SERVICE` | `estate-ai` (default) |
+| `MONGODB_DATABASE` | `estate_ai` (default) |
 | `OLLAMA_BASE_URL` | `https://ollama.com` (default) |
 | `OLLAMA_MODEL` | `gemma4:31b` (default) |
-| `WHATSAPP_MODE` | `simulate` initially; `live` when ready |
-| `WHATSAPP_PHONE_NUMBER_ID` | Meta's numeric **Phone Number ID**, not the telephone number |
+| `WHATSAPP_MODE` | `simulate` initially |
+| `WHATSAPP_PHONE_NUMBER_ID` | Meta's numeric Phone Number ID, when connecting WhatsApp |
 | `WHATSAPP_GRAPH_VERSION` | Supported version shown in your Meta dashboard |
 
-Run the deployment manually after setup, or push a new commit to main. Missing required
-variables fail with a clear message before cloud authentication. Successful runs print
-the dashboard URL and Meta callback URL in the GitHub Actions job summary.
+Add **production environment secrets**, privately through GitHub:
 
-## 6. Connect Meta
+| Secret | Purpose |
+| --- | --- |
+| `MONGODB_URI` | Atlas connection string with the restricted database user's credentials |
+| `ADMIN_API_KEY` | Long random dashboard key |
+| `OLLAMA_API_KEY` | Remote Ollama Cloud API key |
+| `WHATSAPP_ACCESS_TOKEN` | Meta token, required in live mode |
+| `WHATSAPP_APP_SECRET` | Meta app secret, required in live mode |
+| `WHATSAPP_VERIFY_TOKEN` | Your random webhook verification secret, needed for Meta callback verification |
 
-Use `https://YOUR_CLOUD_RUN_URL/webhooks/whatsapp` as the callback and the value of
-`estate-ai-whatsapp-verify-token` as Meta's verify token. Verify/save and subscribe
-to `messages`. The GET verification endpoint works in simulation mode; POST delivery
-and actual replies require `WHATSAPP_MODE=live` and complete credentials. Follow Meta's
-publishing requirements shown in your app before expecting real inbound deliveries.
+WhatsApp secrets may be omitted during simulation. Live mode requires every WhatsApp
+credential plus phone ID and Graph version. Use a suitable long-lived Meta token before
+production use; the initial test token expires.
 
-Cloud Run's public access is required for Meta callbacks. Dashboard data and admin
-APIs still require the admin key, and webhook POSTs require Meta's valid signature.
-Demo inventory is disabled in this deployment, including in simulation.
+Secrets are passed to a private temporary JSON file on the runner, then to Cloud Run
+environment variables. The temporary file is removed in an `always()` cleanup step and
+is never an artifact or Docker build input. **This deliberately avoids Secret Manager:**
+people with sufficient Cloud Run configuration access can view environment values.
+Restrict deploy/admin permissions and rotate credentials after accidental exposure.
 
-## Operation and rollback
+Cloud Run cannot reach Ollama on your PC's `localhost`. The cloud defaults use
+[native Ollama Cloud](https://docs.ollama.com/cloud), requiring its API key. Model
+and endpoint remain configurable; another API protocol needs a client adapter.
 
-One Uvicorn process and one maximum instance are configured. PostgreSQL advisory
-leadership prevents old/new revisions from running queue recovery/processing together
-during a normal rolling deployment. Leadership uses a dedicated database session;
-do not route that connection through a transaction-pooling proxy. The standby worker
-waits until the old revision exits. A database/network failure during an external
-send still has ambiguous outcomes: inspect `delivery_unknown` rather than blindly
-retrying. Monitor Cloud Run logs and failed jobs.
+## 4. Deploy and connect WhatsApp
 
-The workflow gives the embedded worker continuously allocated CPU and keeps an
-instance running so it can finish jobs after the webhook request returns.
-This is the initial single-dealer deployment, not a horizontally scaled queue design.
+Push to main, or Actions → **Deploy Google Cloud Run → Run workflow**. CI starts a
+disposable MongoDB replica set on the GitHub runner and runs the real application
+suite, concurrency/transaction tests, and a Docker HTTP smoke test. It creates no
+test resources on Google Cloud. Pull requests run CI without deployment credentials.
 
-To roll back, revert the source commit and push to main so the known version is
-rebuilt and redeployed. Review database compatibility first. Images are tagged by
-commit SHA; configure Artifact Registry retention without deleting a needed rollback.
+The deploy job runs only after CI succeeds. It builds the image on the GitHub runner,
+pushes the commit-SHA image to Artifact Registry, and deploys Cloud Run. Missing config
+fails explicitly. The job summary prints the dashboard and webhook URLs after health
+verification. The service starts only when MongoDB is reachable.
 
-References: [GitHub OIDC setup](https://docs.cloud.google.com/iam/docs/workload-identity-federation-with-deployment-pipelines),
-[Cloud SQL connection](https://docs.cloud.google.com/sql/docs/postgres/connect-run),
-[Cloud Run background CPU/billing](https://docs.cloud.google.com/run/docs/configuring/billing-settings),
-[Google deployment action](https://github.com/google-github-actions/deploy-cloudrun).
+Open the dashboard and unlock it using `ADMIN_API_KEY`. Its status page reports
+**MongoDB**; it never displays the connection string. Demo inventory is disabled in
+the cloud deployment. Populate real inventory or import BIBA's sheet.
+
+Set Meta's callback to `https://YOUR_SERVICE_URL/webhooks/whatsapp` and use your
+`WHATSAPP_VERIFY_TOKEN` value. GET verification works during simulation; actual inbound
+POSTs/replies require live mode, valid Meta signatures, and Meta's publishing rules.
+
+Public Cloud Run access allows Meta to reach the webhook. Admin APIs still require
+the dashboard key. Keep the database user/URI out of client-side JavaScript.
+
+## Local development and old data
+
+Run `docker compose up -d --wait` for local loopback-only MongoDB, then configure:
+
+```dotenv
+MONGODB_URI=mongodb://127.0.0.1:27017/?replicaSet=rs0
+MONGODB_DATABASE=estate_ai
+```
+
+An Atlas URI also works locally. Existing SQLite `.db` files remain untouched and are
+not automatically copied to Atlas. To preserve an earlier workspace, stop the app,
+configure the destination MongoDB, back up the source, and run:
+
+```powershell
+.venv\Scripts\python.exe -m estate_ai.migrate_sqlite --source estate.db
+```
+
+The migration reads SQLite in read-only mode, commits batches atomically to MongoDB,
+keeps existing destination records, and can resume after interruption. It includes
+inventory, photos, chats, proposals, import history and audits. Review stored contacts
+and demo inventory before using that data with a live sender.
+
+## Operation
+
+One Uvicorn process and one maximum Cloud Run instance are configured. A MongoDB
+lease prevents old/new revisions from processing jobs simultaneously during normal
+rollouts. It renews every 15 seconds and expires after 90 seconds if an instance dies.
+Model calls run outside short database transactions. Concurrent writes use revision
+checks and return HTTP 409; reload and retry those admin operations.
+
+An interrupted external send can still have an ambiguous outcome; review
+`delivery_unknown` before retrying. Monitor Cloud Run failures and Atlas storage.
+Revert and push a known-good commit for rollback; review document compatibility first.
+Configure image retention so old revisions do not accumulate indefinitely.

@@ -1,8 +1,8 @@
 import pytest
-from sqlalchemy import select
 
 from estate_ai.agent import EstateAgent
 from estate_ai.db import Customer, Job, Message, Outbox, Property, now
+from estate_ai.document_query import select
 from estate_ai.workflows import Worker, enqueue
 
 PHONE = "919876543210"

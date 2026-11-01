@@ -5,13 +5,25 @@ import json
 from contextlib import asynccontextmanager, suppress
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import ValidationError
-from sqlalchemy import select
+from pymongo.errors import DocumentTooLarge, DuplicateKeyError
 
 from estate_ai.config import get_settings
 from estate_ai.dashboard import register_dashboard
-from estate_ai.db import Audit, Customer, Job, Message, Outbox, Property, Proposal, connect, now
+from estate_ai.db import (
+    Audit,
+    ConcurrentWriteError,
+    Customer,
+    Job,
+    Message,
+    Outbox,
+    Property,
+    Proposal,
+    connect,
+    now,
+)
+from estate_ai.document_query import select
 from estate_ai.inventory_import import register_inventory_import
 from estate_ai.photos import register_photos
 from estate_ai.property_templates import seed_demo_inventory, templates
@@ -25,7 +37,9 @@ def create_app(settings=None, factory=None, agent=None, whatsapp=None):
 
     @asynccontextmanager
     async def lifespan(app):
-        app.state.factory = factory or connect(settings.database_url)
+        app.state.factory = factory or connect(
+            settings.mongodb_uri.get_secret_value(), settings.mongodb_database
+        )
         app.state.worker = Worker(app.state.factory, settings, agent, whatsapp)
         task = None
         if settings.worker_enabled:
@@ -35,6 +49,8 @@ def create_app(settings=None, factory=None, agent=None, whatsapp=None):
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
+        if factory is None:
+            app.state.factory.close()
 
     app = FastAPI(
         title="Estate AI",
@@ -47,6 +63,20 @@ def create_app(settings=None, factory=None, agent=None, whatsapp=None):
         expected = settings.admin_api_key.get_secret_value()
         if not expected or expected.startswith("replace-") or not hmac.compare_digest(expected, x_api_key):
             raise HTTPException(401, "A configured X-API-Key is required")
+
+    @app.exception_handler(ConcurrentWriteError)
+    @app.exception_handler(DuplicateKeyError)
+    async def conflict(request, exc):
+        return JSONResponse(
+            status_code=409, content={"detail": "Data changed. Reload and retry the operation."}
+        )
+
+    @app.exception_handler(DocumentTooLarge)
+    async def too_large(request, exc):
+        return JSONResponse(
+            status_code=413,
+            content={"detail": "Import is too large for one document. Split the sheet into smaller files."},
+        )
 
     @app.get("/health")
     def health():
@@ -76,7 +106,7 @@ def create_app(settings=None, factory=None, agent=None, whatsapp=None):
                 ]
             ),
             "ollama_api_key_configured": bool(settings.ollama_api_key.get_secret_value()),
-            "database": "SQLite" if settings.database_url.startswith("sqlite") else "PostgreSQL",
+            "database": "MongoDB",
         }
 
     @app.post("/api/simulator/messages", status_code=202, dependencies=[Depends(admin)])

@@ -9,9 +9,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import Field
-from sqlalchemy import func, select
 
 from estate_ai.db import Audit, Customer, Job, Message, Property, Proposal, TestSession
+from estate_ai.document_query import func, select
 from estate_ai.schemas import SearchArgs, StrictModel
 from estate_ai.tools import ToolService, property_data
 from estate_ai.workflows import enqueue

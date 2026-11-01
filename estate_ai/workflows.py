@@ -1,11 +1,11 @@
 import asyncio
 import logging
 
-from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from pymongo.errors import DuplicateKeyError
 
 from estate_ai.agent import EstateAgent
 from estate_ai.db import Audit, Customer, Job, Message, Outbox, now
+from estate_ai.document_query import select
 from estate_ai.messaging import WhatsAppClient
 from estate_ai.tools import ToolService, confirm_proposal
 
@@ -45,14 +45,14 @@ def enqueue(factory, event_id: str, phone: str, text: str, channel: str, timesta
         )
         try:
             session.commit()
-        except IntegrityError:
+        except DuplicateKeyError:
             session.rollback()
             return False
         return True
 
 
 class Worker:
-    """Durable inbox/outbox; PostgreSQL elects one active worker across revisions."""
+    """Durable MongoDB inbox/outbox with one leased worker across revisions."""
 
     def __init__(self, factory, settings, agent=None, whatsapp=None):
         self.factory = factory
@@ -166,40 +166,42 @@ class Worker:
             session.commit()
 
     async def run(self):
-        with self.factory() as session:
-            engine = session.get_bind()
-        if engine.dialect.name != "postgresql":
-            # SQLite development still requires a single API process.
-            await self._run_active()
-            return
         while True:
+            lease = self.factory.lease()
+            active = None
             try:
-                # Dedicated session-level advisory lock, never returned to a pool while held.
-                # This also serializes recovery when old/new Cloud Run revisions overlap.
-                with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
-                    while not connection.exec_driver_sql("SELECT pg_try_advisory_lock(845921730)").scalar():
-                        await asyncio.sleep(2)
-                    try:
-                        await self._run_active(connection)
-                    finally:
-                        if not connection.invalidated:
-                            connection.exec_driver_sql("SELECT pg_advisory_unlock(845921730)")
+                if not lease.acquire():
+                    await asyncio.sleep(2)
+                    continue
+                active = asyncio.create_task(self._run_active())
+                while True:
+                    done, _ = await asyncio.wait({active}, timeout=15)
+                    if done:
+                        await active
+                        break
+                    if not lease.renew():
+                        raise RuntimeError("Worker lease lost")
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:  # noqa: BLE001 - Re-elect after a database connection failure.
+            except Exception as exc:  # noqa: BLE001 - Re-elect after sanitized database/lease failure.
                 log.warning("Worker leadership interrupted (%s)", type(exc).__name__)
-                await asyncio.sleep(2)
+            finally:
+                if active:
+                    active.cancel()
+                    await asyncio.gather(active, return_exceptions=True)
+                try:
+                    lease.release()
+                except Exception as exc:  # noqa: BLE001 - Expiry provides recovery if release is unreachable.
+                    log.warning("Worker lease release failed (%s)", type(exc).__name__)
+            await asyncio.sleep(2)
 
-    async def _run_active(self, leadership_connection=None):
+    async def _run_active(self):
         self.recover()
         while True:
-            if leadership_connection is not None:
-                # Fail closed before starting more work if the lock connection is lost.
-                leadership_connection.exec_driver_sql("SELECT 1")
             try:
                 await self.tick()
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:  # noqa: BLE001 - Keep the worker alive and record sanitized failure types.
+            except Exception as exc:  # noqa: BLE001 - Keep the worker alive with sanitized failures.
                 log.warning("Worker iteration failed (%s)", type(exc).__name__)
             await asyncio.sleep(0.5)

@@ -1,7 +1,7 @@
 # Estate AI — agent workspace
 
 A single-dealer WhatsApp text assistant using **Gemma 4 31B Cloud through local Ollama**, FastAPI,
-LangGraph, Pydantic and SQLAlchemy. The local dashboard is at `/`; API documentation is at `/docs`.
+LangGraph, Pydantic and MongoDB (PyMongo). The local dashboard is at `/`; API documentation is at `/docs`.
 
 Implemented:
 
@@ -34,7 +34,7 @@ Dealer alerts are stored for retrieval via `/api/alerts`; they are not push noti
 
 ## Quick start (PowerShell)
 
-Python 3.11+ is required. Python 3.12 is a suitable deployment baseline.
+Python 3.11+ is required. CI and the Docker image use Python 3.14.
 
 ```powershell
 python -m venv .venv
@@ -43,6 +43,12 @@ Copy-Item .env.example .env
 ```
 
 Edit `.env`: set a random `ADMIN_API_KEY` and keep `WHATSAPP_MODE=simulate`.
+Set `MONGODB_URI` and `MONGODB_DATABASE=estate_ai`. An Atlas URI works locally and in Cloud Run.
+For local-only MongoDB, start a replica set (see `compose.yaml`) before launching the API.
+The old `DATABASE_URL` setting is no longer used; existing `.db` files remain untouched.
+After connecting MongoDB, import an earlier workspace once with
+`python -m estate_ai.migrate_sqlite --source estate.db` (read-only source; existing destination rows are kept).
+
 The default model connection uses your installed, signed-in Ollama:
 
 ```dotenv
@@ -102,7 +108,7 @@ must report no verified matches. It should not invent listings.
    and simulation mode. Demo/real classification cannot be changed after creation.
    In **Add property**, **Edit details** or **Use template**, select photos before saving. Up to 10
    JPEG, PNG or WebP images are accepted per property (8 MB each, maximum 20 megapixels).
-   Photos persist in PostgreSQL/SQLite and load only through authenticated API requests. The first
+   Photos persist in MongoDB and load only through authenticated API requests. The first
    photo is the cover; remove photos from the editor if needed. Photo upload errors retain the
    property and successful uploads so the remaining images can be retried.
 3. **Test Your Agent:** create/select a saved synthetic buyer session and send a message. The backend
@@ -224,16 +230,19 @@ Local model access uses your Ollama sign-in; direct cloud access uses an API key
 .venv\Scripts\ruff.exe check estate_ai tests
 ```
 
-Tests use fake model/transport implementations, real LangGraph execution and temporary SQL databases.
+Tests use fake model/transport implementations, real LangGraph execution and isolated real MongoDB replica-set databases.
 They do not establish real Gemma response quality or Meta delivery. Evaluate English, Hindi, Hinglish
 and Punjabi conversations with the real model before a buyer pilot.
 
 ## Operational boundaries
 
-- SQLite is the local default. PostgreSQL is supported via a SQLAlchemy URL such as
-  `postgresql+psycopg://user:password@localhost:5432/estate`. PostgreSQL still needs integration testing.
-- Schema creation uses `create_all` for this first milestone. Add Alembic migrations before evolving
-  a live database; `create_all` does not migrate existing tables.
+- MongoDB is the only application database. Use Atlas or a local replica set; standalone MongoDB
+  servers cannot provide the atomic inbox/outbox and import commits this app requires.
+- Updates use short transactions with revision checks. The model call is outside the transaction.
+  Conflicting admin updates return HTTP 409 so the user can reload and retry.
+- A MongoDB lease elects one worker across revisions; it renews every 15 seconds and expires after
+  90 seconds if an instance disappears. A lost renewal cancels processing; interrupted external sends
+  still require review. Keep one Uvicorn process and do not run the chat CLI alongside the API worker.
 - This is a single-dealer service with one admin API key, not a multi-agency production system.
 - Only customer-initiated text conversations are handled. No lead number is automatically contacted.
   Freeform sends require a recent inbound message and no opt-out. Templates and consent acquisition
@@ -244,8 +253,7 @@ and Punjabi conversations with the real model before a buyer pilot.
 - STOP, UNSUBSCRIBE and listed Hindi/Punjabi stop commands opt out immediately. The model is also
   instructed to hand off broader natural-language requests. Expand and evaluate multilingual opt-out
   detection before production. Opted-out contacts cannot be resumed through the pause endpoint.
-- A send already accepted by Meta cannot be recalled by a takeover. SQLite write transactions can
-  delay a concurrent administrative update while tool actions are being processed.
+- A send already accepted by Meta cannot be recalled by a takeover.
 - Conversation and evidence records contain personal data. Use TLS, restricted database access,
   encrypted storage/backups and retention/deletion procedures for deployment. No claim of production
   privacy compliance is made by this prototype.
@@ -260,6 +268,6 @@ Provider references: [Ollama cloud](https://docs.ollama.com/cloud),
 
 ## Google Cloud deployment
 
-GitHub Actions CI/CD, a production Docker image, Cloud SQL persistence and Secret
-Manager integration are included. Follow [the deployment guide](docs/GOOGLE_CLOUD_DEPLOYMENT.md)
+GitHub Actions CI/CD deploys one small Cloud Run container; MongoDB Atlas stores app data.
+Google Cloud is used for hosting and its deployment image registry, not database or secret services. Follow [the deployment guide](docs/GOOGLE_CLOUD_DEPLOYMENT.md)
 to configure your Google Cloud project and GitHub `production` environment.

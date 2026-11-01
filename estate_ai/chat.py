@@ -14,7 +14,7 @@ async def main():
         raise SystemExit("Use simulation mode for the local chat command")
     if settings.ollama_requires_api_key and not settings.ollama_api_key.get_secret_value():
         raise SystemExit("Set OLLAMA_API_KEY for a remote endpoint, or use local Ollama on port 11434")
-    factory = connect(settings.database_url)
+    factory = connect(settings.mongodb_uri.get_secret_value(), settings.mongodb_database)
     worker = Worker(factory, settings)
     worker.recover()
     phone = "919000000001"  # Synthetic identity; no external WhatsApp messages are sent.

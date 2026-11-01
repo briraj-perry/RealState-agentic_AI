@@ -2,6 +2,7 @@
 .env.*
 !.env.example
 gha-creds-*.json
+estate-runtime.json
 .venv/
 .uv-cache/
 .test-tmp*/
