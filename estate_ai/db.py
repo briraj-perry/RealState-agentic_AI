@@ -57,11 +57,23 @@ class Customer(Record):
 class Message(Record):
     collection = "messages"
     id, phone, role, content, created = Field(), Field(), Field(), Field(), Field(now)
+    author = Field("ai")
+
+
+class WorkspaceSettings(Record):
+    collection = "workspace_settings"
+    id, business_name = Field("identity"), Field()
 
 
 class TestSession(Record):
     collection, pk = "test_sessions", "phone"
     phone, name, created = Field(), Field(), Field(now)
+    buyer_name, property_id, listing_id = Field(""), Field(""), Field("")
+
+
+class PropertyListing(Record):
+    collection = "property_listings"
+    id, property_id, demo = Field(), Field(), Field(False)
 
 
 class Property(Record):
@@ -109,6 +121,7 @@ class Job(Record):
 class Outbox(Record):
     collection = "outbox"
     id, phone, body, channel = Field(), Field(), Field(), Field()
+    sender = Field("ai")
     state, provider_id, error, created = Field("pending"), Field(""), Field(""), Field(now)
 
 
@@ -118,10 +131,12 @@ class Audit(Record):
 
 
 MODELS = (
+    WorkspaceSettings,
     Customer,
     Message,
     TestSession,
     Property,
+    PropertyListing,
     PropertyPhoto,
     PropertyMetadata,
     InventoryImport,

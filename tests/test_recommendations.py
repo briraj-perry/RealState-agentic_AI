@@ -1,5 +1,5 @@
 from estate_ai.db import Customer, Message, Property
-from estate_ai.property_templates import seed_demo_inventory
+from estate_ai.property_templates import seed_template, templates
 from estate_ai.tools import ToolService
 
 
@@ -8,7 +8,9 @@ def setup(session):
     session.add(Customer(phone="919876543211"))
     session.add(Message(id="search-1", phone="919876543210", role="user", content="Show me some homes"))
     session.flush()
-    seed_demo_inventory(session)
+    # A bounded fixture makes exhaustion tests independent of the catalog's size.
+    for item in templates()[:8]:
+        seed_template(session, item)
     return ToolService(session, "919876543210", "search-1", allow_demo=True)
 
 

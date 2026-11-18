@@ -3,7 +3,7 @@ import json
 import httpx
 from fastapi.testclient import TestClient
 
-from estate_ai.db import Audit, Customer, Proposal
+from estate_ai.db import Audit, Customer, Property, PropertyMetadata, Proposal
 from estate_ai.main import create_app
 
 HEADERS = {"X-API-Key": "test-admin-secret"}
@@ -14,6 +14,11 @@ def test_dashboard_assets_and_read_models_require_auth(factory, settings):
         assert client.get("/").status_code == 200
         assert "Test Your Agent" in client.get("/assets/app.js").text
         assert client.get("/assets/styles.css").status_code == 200
+        manifest = client.get("/manifest.webmanifest")
+        assert manifest.headers["content-type"] == "application/manifest+json"
+        assert manifest.json()["display"] == "standalone"
+        for icon in manifest.json()["icons"]:
+            assert client.get(icon["src"]).headers["content-type"] == "image/png"
         assert client.get("/api/dashboard").status_code == 401
         assert client.get("/api/conversations").status_code == 401
         assert client.get("/api/test-sessions").status_code == 401
@@ -78,11 +83,23 @@ def test_overview_requirements_confirmations_and_followups(factory, settings):
                 status="requested",
             )
         )
+        session.add(
+            Property(
+                id="p1", title="Apartment", city="Mohali", bedrooms=3, asking_price=8500000, available=False
+            )
+        )
+        session.add(
+            PropertyMetadata(property_id="p1", payload=json.dumps({"details": {"address": "1 Main Road"}}))
+        )
         session.commit()
     with TestClient(create_app(settings, factory)) as client:
         data = client.get("/api/dashboard", headers=HEADERS).json()
         assert data["counts"]["human_followups"] == 1
         assert data["counts"]["visit_requests"] == 1
+        visit = data["visits"][0]
+        assert visit["address"] == "1 Main Road"
+        assert visit["location"] == "Mohali"
+        assert visit["property_available"] is False
         buyer = next(row for row in data["customers"] if row["name"] == "Buyer")
         assert buyer["preferences"]["location"] == "Mohali"
         assert buyer["confirmed_budget"] == 9000000

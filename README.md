@@ -5,7 +5,7 @@ LangGraph, Pydantic and MongoDB (PyMongo). The local dashboard is at `/`; API do
 
 Implemented:
 
-- A bounded LangGraph model/tool loop with six schema-validated, server-scoped tools.
+- A bounded LangGraph model/tool loop with seven schema-validated, server-scoped tools.
 - Inventory search and details, nonfinancial preference memory, budget/offer confirmation,
   site-visit requests and human handoff.
 - Conversational recommendations: normally three matching options with verified features, a useful
@@ -27,7 +27,7 @@ Implemented:
   mapping, row validation, INR/lakh/crore conversion and explicit create/update review.
 
 **Not connected or implemented yet:** Google Calendar booking/OAuth, lead-platform ingestion,
-outbound templates/campaigns, voice notes/calls, WhatsApp photo/media sending, dealer outbound chat,
+outbound templates/campaigns, voice notes/calls, WhatsApp photo/media sending,
 multi-tenant authorization, database migrations and automated follow-ups.
 Site visits are **requests pending dealer approval**, never confirmed bookings.
 Dealer alerts are stored for retrieval via `/api/alerts`; they are not push notifications.
@@ -93,17 +93,53 @@ You can also stop the API and run:
 This uses real cloud inference and a synthetic buyer identity. Without inventory the assistant
 must report no verified matches. It should not invent listings.
 
+## Run the dealer workspace on a phone
+
+Open the deployed HTTPS dashboard on your phone and unlock it with your workspace admin key.
+On Android Chrome, use **Install app** or **Add to Home screen** in the browser menu.
+On iPhone, use **Share → Add to Home Screen** in Safari. The installed web app needs a connection to the backend.
+
+For a browser preview on a trusted development Wi-Fi network, run the command below and open
+`http://<computer-LAN-IP>:8000` on the phone. Find the computer's LAN address with `ipconfig` and use the
+same Wi-Fi network on both devices. Use test data and a development key for this HTTP preview.
+
+```powershell
+.venv\Scripts\python.exe -m uvicorn estate_ai.main:app --host 0.0.0.0 --port 8000
+```
+
+## Dealer visit itinerary
+
+Open **Overview → Visit itinerary** to see upcoming requests in India time, ordered by proposed start time.
+Requests with past or missing times appear under **Time to review**. Each card shows who needs to confirm,
+the inventory availability flag if the property is marked unavailable, and a shortcut to the buyer conversation.
+Add a verified address in **Properties** for directions. With only a locality or city, the card links to the area.
+
+The next useful additions are:
+
+1. **Before the visit** — assign a dealer, capture a visit duration and a verified meeting point, and confirm
+   access with the owner or site contact. Keep gate or access instructions in a dealer-only record.
+2. **For tours with multiple stops** — show the stop order and travel buffers and flag overlapping appointments.
+3. **After each visit** — record completed, rescheduled or no-show, buyer feedback, and the next follow-up owner and date.
+
+These priorities draw on [CRMLS's ShowingTime workflow](https://kb.crmls.org/knowledgebase/showingtime/)
+and [ShowingTime's mobile workflow](https://showingtimemls.uservoice.com/knowledgebase/articles/1129030-mobile-app-overview).
+
+For the Google Calendar follow-up, add explicit dealer approval, visit duration and rescheduling first.
+Then connect the dealer's calendar via OAuth, create an event after approval, and save the Calendar event ID
+against the visit so retries, reschedules and cancellations can reuse the same event. Use Asia/Kolkata for the
+event and make buyer invitations an explicit choice. [Google Calendar event creation](https://developers.google.com/workspace/calendar/api/v3/reference/events/insert)
+
 ## Dashboard workflow
 
 1. **Settings:** inspect the model (`gemma4:31b-cloud`), endpoint, authentication, worker and integration
    configuration. Click **Check connection** to query Ollama's model list. A successful check means
    reachable/listed, not authenticated cloud inference. Credentials are never returned in the settings API.
-   Settings are read-only: edit `.env` and restart to change configuration.
+   The company name is editable in Settings and saved in MongoDB. Other settings remain read-only: edit the environment and restart/redeploy to change them.
 2. **Properties:** add or edit dealer-verified inventory. Prices use INR, not lakh units. Set a property
    unavailable to remove it from the agent's recommendations. Search and availability filters are included.
-   **Browse templates** offers eight fictional 1–4 BHK examples across Mohali, Chandigarh, Panchkula,
+   **Browse templates** offers 500 detailed fictional Biba 1–4 BHK examples across Mohali, Chandigarh, Panchkula,
    Zirakpur and Dera Bassi. **Use template** opens an editable draft with a new ID; it stays labelled
-   as demo data. **Add sample properties** adds the eight fixtures once without overwriting existing
+   as demo data. **Add sample properties** adds the 500 fixtures once without overwriting existing
    listings or resetting edited sample prices. Demo creation/editing requires `ALLOW_DEMO_DATA=true`
    and simulation mode. Demo/real classification cannot be changed after creation.
    In **Add property**, **Edit details** or **Use template**, select photos before saving. Up to 10
@@ -191,7 +227,7 @@ Invoke-RestMethod -Uri http://127.0.0.1:8000/api/conversations/919000000001 -Hea
 
 The example property is an input example, **not verified real inventory**. Replace it before live use.
 For explicitly fictional inventory, set `ALLOW_DEMO_DATA=true` and call `POST /api/demo/seed`
-or use **Add sample properties** on the Properties page. This creates up to eight sample listings.
+or use **Add sample properties** on the Properties page. This creates up to 500 sample listings.
 Demo listings are flagged and hidden from tools unless allowed. Live mode rejects demo-data permission.
 
 API routes:
@@ -271,3 +307,48 @@ Provider references: [Ollama cloud](https://docs.ollama.com/cloud),
 GitHub Actions CI/CD deploys one small Cloud Run container; MongoDB Atlas stores app data.
 Google Cloud is used for hosting and its deployment image registry, not database or secret services. Follow [the deployment guide](docs/GOOGLE_CLOUD_DEPLOYMENT.md)
 to configure your Google Cloud project and GitHub `production` environment.
+
+## Contextual Biba enquiry testing
+
+See [the research and walkthrough](docs/BIBA_PROPERTY_RESEARCH.md) for the 500 fictional templates,
+unique Housing listing mappings, buyer/property context, and saved dealer handoff summaries.
+Choose Properties → Browse templates → Test this property, enter a synthetic buyer name, and say Hi.
+Simulation mode and demo permission are required; no WhatsApp account is needed for these tests.
+
+## Human replies and company identity
+
+The default company is **Hukam Realators**. Change it in Settings → Company name → Save company name.
+This persists in MongoDB and applies to new AI replies across app instances, without a restart.
+Existing conversation history is retained. `BUSINESS_NAME` is the environment default if no saved
+company name exists; GitHub production deployments also accept that variable.
+
+Overview prioritizes human follow-ups, pending visit requests, recent buyer context and recorded
+agent/delivery failures. All activity / Real buyers / Test only filters keep synthetic conversations
+recognizable. Every buyer action opens the matching conversation. An unanswered buyer message in a
+paused conversation is marked Reply needed; after a team reply it becomes Awaiting buyer.
+
+In Conversations, select a handoff (or click Take over), then write in **Reply as [company]**.
+The AI stays paused until Resume AI is selected. Human replies are labelled separately in both the
+inbox and Test Your Agent, with queued, simulated, accepted, delivered or uncertain delivery status.
+The inbox refreshes incoming messages and delivery states while preserving reply drafts. In Test Your Agent, paused sessions still accept buyer messages, so both sides of a human conversation can be tested without resuming AI.
+
+Test-session replies are always simulated, including if the service later switches to live mode.
+Real buyers require live WhatsApp configuration, a recent inbound message inside the existing
+24-hour reply window, and no opt-out. Expired windows and opt-outs block manual sends too. This
+feature does not implement proactive templates or first-contact outreach. Each manual send has an
+idempotency key, uses the durable outbox, suppresses pending AI work, and never automatically retries
+an uncertain external send. Inspect WhatsApp history before manually repeating an uncertain reply.
+
+## Related properties
+
+The first greeting for a property-based test enquiry shows the selected home and up to three
+related homes as separate card groups. Use **More related properties**, or type **show similar
+properties**, to see new options. A `find_related_properties` tool supports natural follow-up requests.
+
+Related homes must be available, have the same city and BHK, and have asking prices within 20% of
+the selected home's current asking price. A saved buyer budget (including a pending confirmation)
+is an additional ceiling. Same-locality homes rank first, then proximity in asking price. Each card
+explains the locality and price differences. The selected home and previously retrieved properties
+are excluded. Real and fictional inventory are never mixed in a related shortlist. Empty results
+ask permission to change criteria instead of silently widening them; the original enquiry context
+is preserved. Handoffs and opt-outs block automated related-property actions.

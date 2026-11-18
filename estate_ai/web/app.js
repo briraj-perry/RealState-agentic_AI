@@ -23,6 +23,9 @@ let toastTimer;
 const photoCache = new Map();
 let draftPhotos=[], draftFiles=[], draftPropertyId=null;
 let inventoryImport=null, importReview=null;
+let templatePage=0, propertyPage=0, draftDetails=null;
+const humanDrafts=new Map();
+state.overviewScope=sessionStorage.getItem('estate-overview-scope')||'all';
 async function loadPhoto(photo) {
   if(photoCache.has(photo.id))return photoCache.get(photo.id);
   const response=await fetch('/api/property-photos/'+encodeURIComponent(photo.id),{headers:{'X-API-Key':state.key}});
@@ -39,7 +42,8 @@ function cover(p) {
 const money = value => value == null ? 'Not confirmed' : new Intl.NumberFormat('en-IN', {style:'currency',currency:'INR',maximumFractionDigits:0}).format(value);
 const price = value => value >= 10000000 ? `₹${(value/10000000).toLocaleString('en-IN',{maximumFractionDigits:2})} Cr` : `₹${(value/100000).toLocaleString('en-IN',{maximumFractionDigits:2})} L`;
 const date = stamp => stamp ? new Date(stamp*1000).toLocaleString('en-IN',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit',timeZone:'Asia/Kolkata'}) : 'No activity yet';
-const visitDate = value => value ? new Date(value).toLocaleString('en-IN',{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit',timeZone:'Asia/Kolkata'}) + ' IST' : 'Time not supplied';
+const visitTime = value => value ? Date.parse(value) : NaN;
+const visitDate = value => Number.isFinite(visitTime(value)) ? new Date(value).toLocaleString('en-IN',{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit',timeZone:'Asia/Kolkata'}) + ' IST' : 'Time not supplied';
 const badge = (label, kind='neutral') => `<span class="badge ${kind}"><span class="tiny-dot"></span>${esc(label)}</span>`;
 const avatar = (name='Buyer') => `<span class="avatar">${esc(name.split(/\s+/).map(part => part[0]).slice(0,2).join('').toUpperCase())}</span>`;
 const heading = (title, subtitle, action='') => `<div class="page-heading"><div><span class="eyebrow">YOUR AGENT WORKSPACE</span><h1>${esc(title)}</h1><p>${esc(subtitle)}</p></div>${action}</div>`;
@@ -72,6 +76,7 @@ async function navigate() {
   try {
     state.status=await api('/status');
     $('.workspace-label strong').textContent=state.status.business_name;
+    $('.workspace-avatar').textContent=state.status.business_name.trim().split(/\s+/).slice(0,2).map(part=>part[0]).join('').toUpperCase();
     const renderer={overview:renderOverview,properties:renderProperties,conversations:renderConversations,test:renderTest,settings:renderSettings}[state.page];
     await renderer(nonce);
   } catch(error) {
@@ -84,57 +89,147 @@ function scheduleOverview(nonce) {
   clearTimeout(state.timer);
   state.timer=setTimeout(async()=>{if(state.page!=='overview'||nonce!==state.nonce||!state.key)return;try{await renderOverview(nonce);}catch(error){toast('Overview could not refresh: '+error.message);if(state.key&&nonce===state.nonce)scheduleOverview(nonce);}},5000);
 }
+function openBuyerLinks() {
+  document.querySelectorAll('[data-open-buyer]').forEach(link=>link.addEventListener('click',()=>{state.selectedPhone=link.dataset.openBuyer;state.conversationTab='messages';}));
+}
+function buyerLink(phone,label='Open conversation ↗',kind='secondary') {
+  return `<a href="#conversations" class="button ${kind}" data-open-buyer="${esc(phone)}">${esc(label)}</a>`;
+}
+function waitingSince(timestamp) {
+  if(!timestamp)return 'No inbound message yet';
+  const mins=Math.max(0,Math.floor((Date.now()/1000-timestamp)/60));
+  return mins<60?mins+' min ago':mins<1440?Math.floor(mins/60)+' hr ago':Math.floor(mins/1440)+' days ago';
+}
+function itineraryCard(visit, now) {
+  const start=visitTime(visit.details.start_time);
+  const passed=start<now;
+  const needsBuyer=visit.status==='pending_confirmation';
+  const place=[visit.address,visit.location].filter(Boolean).join(', ');
+  const directions=place&&!visit.test&&!visit.property_demo
+    ? `<a class="button secondary" href="https://www.google.com/maps/dir/?api=1&destination=${esc(encodeURIComponent(place))}" target="_blank" rel="noopener noreferrer">${visit.address?'Directions':'Area map'} ↗</a>`
+    : '';
+  const next=passed?'Ask the buyer for a new time.':!Number.isFinite(start)?'Ask the buyer for a date and time.'
+    :needsBuyer?'Confirm the proposed time with the buyer.':'Verify access, availability and the meeting point before confirming.';
+  return `<article class="visit-work-item">
+    <div class="visit-title"><strong>${esc(visit.property_title||visit.details.property_id||'Property to verify')}</strong>${visit.test?badge('Test'):''}</div>
+    <p class="visit-time">${esc(visitDate(visit.details.start_time))}</p>
+    <p>${esc(visit.buyer_name||visit.phone)}${visit.details.property_id?' · '+esc(visit.details.property_id):''}</p>
+    <p>${esc(place||'Meeting point to verify')}</p>
+    <div class="visit-status">${badge(passed?'Time passed':needsBuyer?'Awaiting buyer':'Awaiting dealer approval','amber')}${visit.property_available===false?badge('Marked unavailable','amber'):''}</div>
+    <p>${esc(next)}</p>
+    <div class="visit-actions">${buyerLink(visit.phone,'Open buyer chat ↗')}${directions}</div>
+  </article>`;
+}
 async function renderOverview(nonce) {
-  const data=await api('/dashboard'); if(nonce!==state.nonce)return;
-  const snapshot=nonce+JSON.stringify(data);
-  if(state.overviewSnapshot===snapshot){scheduleOverview(nonce);return;}
-  state.overviewSnapshot=snapshot;
-  const metrics=[['conversations','Conversations','Including your test sessions','conversations'],['properties','Properties','Real and labelled demo inventory','properties'],['visit_requests','Visit requests','Awaiting buyer or dealer · live updates','visit'],['human_followups','Human follow-ups','Paused conversations · excluding opt-outs','human']];
-  const buyers=data.customers.filter(c=>Object.keys(c.preferences).length || c.confirmed_budget);
-  const followups=data.customers.filter(c=>c.paused&&!c.opted_out);
-  $('#content').innerHTML=heading('A clear view of your next move.','Your conversations, buyer requirements and next steps, all in one place.',linkButton('Test your agent','test'))+
-    `<section class="hero"><div><span class="eyebrow">MEET YOUR NEW FIRST RESPONDER</span><h2>Every enquiry is the start<br>of a new possibility.</h2><p>Your agent is here to listen, find the right properties and help buyers take the next step. Try a conversation to see it in action.</p></div><div class="hero-visual" aria-hidden="true"></div></section>`+
-    `<section class="metrics" aria-label="Workspace statistics">${metrics.map(([key,title,note,symbol])=>`<div class="metric"><span class="metric-title">${title}</span><span class="metric-icon">${icon(symbol)}</span><div class="metric-value">${data.counts[key]}</div><span class="metric-note">${note}</span></div>`).join('')}</section>`+
-    `<div class="dashboard-grid"><div class="card-stack"><section class="card"><div class="card-head"><div><h2>Buyer requirements</h2><p>What your buyers have shared so far</p></div><a class="button ghost" href="#conversations">View all ↗</a></div>${buyers.length?`<div class="table-wrap"><table class="requirements-table"><thead><tr><th>BUYER</th><th>LOOKING FOR</th><th>CONFIRMED BUDGET</th></tr></thead><tbody>${buyers.slice(0,6).map(c=>`<tr><td><div class="buyer-cell">${avatar(c.name)}<div><strong>${esc(c.name)}</strong><small>${c.test?'Test conversation':esc(c.phone)}</small></div></div></td><td>${esc([c.preferences.bedrooms!=null?c.preferences.bedrooms+' BHK':null,c.preferences.location].filter(Boolean).join(' · ')||'Still learning')}</td><td>${money(c.confirmed_budget)}</td></tr>`).join('')}</tbody></table></div>`:empty('conversations','Get to know your next buyer','Requirements will appear here when the agent saves preferences or the buyer confirms a budget.',linkButton('Start a test conversation','test','secondary'))}<div class="panel-note">Based on saved conversation data. Test conversations are included.</div></section>
-    <section class="card"><div class="card-head"><div><h2>Recent conversations</h2><p>A little context before your next hello</p></div>${badge(data.customers.length+' shown')}</div>${data.customers.length?`<div class="card-body">${data.customers.slice(0,4).map(c=>`<a href="#conversations" class="row">${avatar(c.name)}<div class="row-main"><strong>${esc(c.name)}</strong><p>${esc(c.last_message.slice(0,100))}</p></div>${badge(c.opted_out?'Opted out':c.paused?'Human follow-up':c.test?'Test':'AI enabled',c.paused?'amber':'neutral')}</a>`).join('')}</div>`:empty('conversations','A fresh start','Your first conversation will appear here.')}</section></div>
-    <div class="card-stack"><section class="card" aria-label="Visit requests"><div class="card-head"><div><h2>Visit requests</h2><p>${data.counts.visits_awaiting_buyer} awaiting buyer · ${data.counts.visits_awaiting_dealer} awaiting dealer</p></div>${icon('visit')}</div>${data.visits.length?`<div class="card-body visit-list">${data.visits.map(v=>`<div class="row"><span class="integration-icon">${icon('visit')}</span><div class="row-main"><strong>${esc(v.property_title||v.details.property_id)}</strong><p>${esc(v.details.property_id)}${v.location?' · '+esc(v.location):''}</p><p>${esc(visitDate(v.details.start_time))}</p><p>${esc(v.buyer_name||v.phone)}${v.test?' · Test conversation':''}</p>${badge(v.status==='requested'?'Awaiting dealer':v.status==='pending_confirmation'?'Awaiting buyer':v.status,'amber')}<p><a href="#conversations" class="button ghost" data-visit-conversation="${esc(v.phone)}">Open conversation ↗</a></p></div></div>`).join('')}</div>`:empty('visit','No visits requested yet','When your agent creates a site-visit request, it appears here—even before the buyer confirms.')}<div class="panel-note">Updates every 5 seconds. Requests are not calendar bookings.</div></section>
-    <section class="card"><div class="card-head"><div><h2>Needs your attention</h2><p>Conversations that could use a human touch</p></div>${badge(followups.length+' pending',followups.length?'amber':'neutral')}</div>${followups.length?`<div class="card-body">${followups.slice(0,5).map(c=>`<div class="row">${avatar(c.name)}<div class="row-main"><strong>${esc(c.name)}</strong><p>${esc(data.alerts.find(a=>a.phone===c.phone)?.detail||'Conversation paused for human follow-up.')}</p><a href="#conversations" class="button ghost">Open conversations ↗</a></div></div>`).join('')}</div>`:empty('human','You’re all caught up','Human handoffs and paused conversations will show up here.')}</section></div></div>`;
-  document.querySelectorAll('[data-visit-conversation]').forEach(link=>link.addEventListener('click',()=>{state.selectedPhone=link.dataset.visitConversation;state.conversationTab='messages';}));
+  const data=await api('/dashboard');if(nonce!==state.nonce)return;
+  const now=Date.now();
+  const snapshot=nonce+state.overviewScope+JSON.stringify(data)+data.visits.filter(v=>visitTime(v.details.start_time)<now).length;
+  if(state.overviewSnapshot===snapshot){scheduleOverview(nonce);return;}state.overviewSnapshot=snapshot;
+  const scope=state.overviewScope;
+  const inScope=c=>scope==='all'||c.test===(scope==='test');
+  const customers=data.customers.filter(inScope);
+  const followups=customers.filter(c=>c.paused&&!c.opted_out).sort((a,b)=>Number(Boolean(b.reply_needed))-Number(Boolean(a.reply_needed))||a.last_inbound-b.last_inbound);
+  const needsReply=followups.filter(c=>c.reply_needed);
+  const visits=data.visits.filter(v=>inScope(v)&&['pending_confirmation','requested'].includes(v.status));
+  const upcoming=visits.filter(v=>visitTime(v.details.start_time)>=now)
+    .sort((a,b)=>visitTime(a.details.start_time)-visitTime(b.details.start_time));
+  const needsAttention=visits.filter(v=>!(visitTime(v.details.start_time)>=now));
+  const dealerVisits=visits.filter(v=>v.status==='requested');
+  const operations=data.operations||{};
+  const issues=(operations.issues||[]).filter(i=>customers.some(c=>c.phone===i.phone));
+  const active=customers.filter(c=>!c.paused&&!c.opted_out).length;
+  const recent=[...customers].sort((a,b)=>b.last_message_at-a.last_message_at).slice(0,6);
+  const buyerRows=customers.filter(c=>Object.keys(c.preferences).length||c.confirmed_budget||c.property_id).slice(0,6);
+  const scopeName=scope==='all'?'All conversations':scope==='test'?'Test conversations':'Real buyers';
+  $('#content').innerHTML=heading('Your work queue.','See who needs you, reply with context, and keep the next step moving.',`<div class="heading-actions">${linkButton('Open inbox','conversations','secondary')}${linkButton('Test your agent','test')}</div>`)+
+    `<div class="overview-bar"><div><strong>${esc(data.business_name||state.status.business_name)}</strong><p>${state.status.whatsapp_mode==='live'?'WhatsApp live mode configured':'App simulation · test replies stay in Estate AI'}</p></div><div class="filter-tabs" role="group" aria-label="Overview conversations">${[['all','All activity'],['real','Real buyers'],['test','Test only']].map(([value,label])=>`<button data-overview-scope="${value}" class="${scope===value?'selected':''}">${label}</button>`).join('')}</div><small>Refreshes every 5 seconds</small></div>`+
+    `<section class="metrics" aria-label="Workspace statistics">${[
+      [needsReply.length,'Buyers waiting','Human reply needed','human'],
+      [dealerVisits.length,'Visits to review','Buyer confirmed · approval needed','visit'],
+      [active,'AI conversations','Automation enabled · '+scopeName.toLowerCase(),'conversations'],
+      [operations.available_properties??data.counts.properties,'Available properties',(operations.demo_properties||0)+' fictional test listings in inventory','properties']
+    ].map(([value,label,note,symbol])=>`<div class="metric"><span class="metric-title">${label}</span><span class="metric-icon">${icon(symbol)}</span><div class="metric-value">${value}</div><span class="metric-note">${esc(note)}</span></div>`).join('')}</section>`+
+    `<div class="overview-work-grid"><div class="card-stack"><section class="card"><div class="card-head"><div><h2>Human follow-ups</h2><p>${needsReply.length} waiting for a reply · ${followups.filter(c=>c.followup_status==='awaiting_buyer').length} awaiting buyer</p></div>${badge(followups.length+' open',followups.length?'amber':'neutral')}</div>${followups.length?`<div class="followup-list">${followups.slice(0,10).map(c=>`<article class="followup-item"><div class="followup-heading">${avatar(c.name)}<div><h3>${esc(c.name)}</h3><small>${c.test?'Synthetic buyer':esc(c.phone)} · Last inbound ${esc(waitingSince(c.last_inbound))}</small></div>${badge(({reply_needed:'Reply needed',reply_queued:'Reply queued',delivery_review:'Review delivery',awaiting_buyer:'Awaiting buyer'})[c.followup_status]||'Review conversation',c.reply_needed||c.followup_status==='delivery_review'?'amber':'neutral')}</div>${c.property_id?`<p class="followup-property">${esc(c.property_title)} · ${esc(c.property_id)}</p>`:''}<p>${esc(alertSummary(data.alerts.find(a=>a.phone===c.phone)?.detail||'Conversation taken over for human support.'))}</p><blockquote>${esc(c.last_message.slice(0,220))}</blockquote><div class="followup-actions">${buyerLink(c.phone,c.reply_needed?'Reply to buyer ↗':'Continue conversation ↗','primary')}<small>AI stays paused until you resume it</small></div></article>`).join('')}</div>`:empty('human','No buyers waiting for you',scope==='real'?'Real buyer handoffs will appear here. Use Test only to review simulated leads.':'Handoffs appear here with the buyer’s property and conversation context.')}</section>
+    <section class="card"><div class="card-head"><div><h2>Recent conversations</h2><p>${customers.length} conversations · ${scopeName.toLowerCase()}</p></div>${linkButton('View inbox','conversations','ghost')}</div>${recent.length?`<div class="card-body">${recent.map(c=>`<a href="#conversations" class="row" data-open-buyer="${esc(c.phone)}">${avatar(c.name)}<div class="row-main"><strong>${esc(c.name)}</strong><p>${esc(c.last_message.slice(0,110))}</p><small>${esc(waitingSince(c.last_message_at))}${c.test?' · Test':''}</small></div>${badge(c.opted_out?'Opted out':c.paused?'With team':'AI active',c.paused?'amber':'neutral')}</a>`).join('')}</div>`:empty('conversations','No activity in this view','New enquiries and replies appear here.')}</section></div>
+    <div class="card-stack"><section class="card" aria-label="Visit itinerary"><div class="card-head"><div><h2>Visit itinerary</h2><p>${upcoming.length} upcoming · ${needsAttention.length} need a new time</p></div>${icon('visit')}</div>${visits.length?`<div class="card-body visit-list">${upcoming.map(v=>itineraryCard(v,now)).join('')}${needsAttention.length?`<h3>Time to review</h3>${needsAttention.map(v=>itineraryCard(v,now)).join('')}`:''}</div>`:empty('visit','No pending visits','Requests will appear here when a buyer proposes a visit.')}<div class="panel-note">Visit requests require team approval before booking.</div></section>
+    <section class="card"><div class="card-head"><div><h2>Delivery & agent issues</h2><p>Review before sending another reply</p></div>${badge(issues.length+' to review',issues.length?'amber':'green')}</div>${issues.length?`<div class="card-body">${issues.slice(0,6).map(i=>`<div class="issue-item"><strong>${esc(customers.find(c=>c.phone===i.phone)?.name||i.phone)}</strong><p>${i.kind==='delivery_unknown'?'Delivery is uncertain. Check WhatsApp history before resending.':'Agent processing failed. Review the conversation and take over.'}</p>${buyerLink(i.phone,'Review conversation ↗')}</div>`).join('')}</div>`:empty('test','No recorded delivery or job failures','This reflects saved job and delivery states, not an end-to-end integration check.')}</section>
+    <section class="card"><div class="card-head"><h2>Buyer context at a glance</h2></div>${buyerRows.length?`<div class="card-body">${buyerRows.map(c=>`<div class="context-row"><strong>${esc(c.name)}${c.test?' · Test':''}</strong><p>${esc(c.property_title||[c.preferences.bedrooms?c.preferences.bedrooms+' BHK':'',c.preferences.location].filter(Boolean).join(' · ')||'General enquiry')}</p><p>Confirmed budget: ${money(c.confirmed_budget)}</p>${buyerLink(c.phone,'View details ↗','ghost')}</div>`).join('')}</div>`:empty('properties','Property context appears here','A selected listing or saved buyer requirements will give your team a starting point.')}</section></div></div>`;
+  openBuyerLinks();
+  document.querySelectorAll('[data-overview-scope]').forEach(b=>b.addEventListener('click',()=>{state.overviewScope=b.dataset.overviewScope;sessionStorage.setItem('estate-overview-scope',state.overviewScope);renderOverview(nonce).catch(e=>toast(e.message));}));
   scheduleOverview(nonce);
 }
 async function renderProperties(nonce) {
   state.properties=await api('/properties');if(nonce!==state.nonce)return;
   await preloadCovers(state.properties);if(nonce!==state.nonce)return;
   $('#content').innerHTML=heading('Good matches start with good inventory.','Keep property details current so your agent can recommend with confidence.',`<div class="heading-actions">${button('Import Excel','import-inventory','secondary','arrow')}${button('Browse templates','browse-templates','secondary','properties')}${button('Add property','add-property')}</div>`)+
-    `<div class="template-banner"><div><strong>More scenarios. Better testing.</strong><p>Try 8 fictional templates across Mohali, Chandigarh, Panchkula, Zirakpur and Dera Bassi.</p></div>${button('Add sample properties','seed-properties','secondary','plus')}</div>`+
+    `<div class="template-banner"><div><strong>More scenarios. Better testing.</strong><p>Explore 500 detailed fictional Biba templates across Mohali, Chandigarh, Panchkula, Zirakpur and Dera Bassi.</p></div>${button('Add sample properties','seed-properties','secondary','plus')}</div>`+
     `<div class="toolbar"><label class="search-field">${icon('search')}<input id="property-search" placeholder="Search by title, city or property ID" aria-label="Search properties"></label><div class="filter-tabs" role="group" aria-label="Filter properties"><button data-filter="all" class="selected">All properties</button><button data-filter="available">Available</button><button data-filter="unavailable">Unavailable</button></div></div><div id="properties-results"></div>`;
   bind('#add-property','click',()=>openProperty());
   bind('#import-inventory','click',openInventoryImport);
   bind('#browse-templates','click',showTemplates);
   bind('#seed-properties','click',async()=>{if(!state.status.demo_inventory_allowed||state.status.whatsapp_mode==='live'){toast('Enable ALLOW_DEMO_DATA=true in simulation mode and restart the backend to use sample inventory.');return;}$('#seed-properties').disabled=true;try{const result=await api('/demo/seed',{method:'POST'});toast(result.created_count?`Added ${result.created_count} fictional sample properties.`:'The sample properties are already in your inventory.');await renderProperties(state.nonce);}catch(error){$('#seed-properties').disabled=false;throw error;}});
-  bind('#property-search','input',paintProperties);
-  document.querySelectorAll('[data-filter]').forEach(b=>b.addEventListener('click',()=>{state.propertyFilter=b.dataset.filter; document.querySelectorAll('[data-filter]').forEach(item=>item.classList.toggle('selected',item===b));paintProperties();}));
-  state.propertyFilter='all';paintProperties();
+  bind('#property-search','input',()=>{propertyPage=0;paintProperties();});
+  document.querySelectorAll('[data-filter]').forEach(b=>b.addEventListener('click',()=>{state.propertyFilter=b.dataset.filter;propertyPage=0; document.querySelectorAll('[data-filter]').forEach(item=>item.classList.toggle('selected',item===b));paintProperties();}));
+  state.propertyFilter='all';propertyPage=0;paintProperties();
 }
 function paintProperties() {
   const term=($('#property-search')?.value||'').toLowerCase();
-  const rows=state.properties.filter(p=>(state.propertyFilter==='all'||p.available===(state.propertyFilter==='available'))&&[p.title,p.city,p.locality,p.id].join(' ').toLowerCase().includes(term));
-  $('#properties-results').innerHTML=rows.length?`<div class="property-grid">${rows.map(p=>`<article class="property-card"><div class="property-cover">${cover(p)}${badge(p.demo?'Fictional demo':p.available?'Available':'Unavailable',p.demo?'amber':p.available?'green':'neutral')}<span class="property-ref">${esc(p.id)}${p.photos?.length?' · '+p.photos.length+' photos':''}</span></div><div class="property-content"><h3>${esc(p.title)}</h3><p>${esc([p.locality,p.city].filter(Boolean).join(', '))} · ${p.bedrooms} BHK${!p.available?' · Unavailable':''}</p><div class="property-price">${price(p.asking_price_inr)}<small>asking price</small></div><p>${esc(p.description.slice(0,100)||'No description added.')}</p></div><div class="property-footer"><span>Updated ${esc(date(p.verified_at))}</span><button class="button secondary" data-edit="${esc(p.id)}">Edit details ↗</button></div></article>`).join('')}</div>`:
+  const matches=state.properties.filter(p=>(state.propertyFilter==='all'||p.available===(state.propertyFilter==='available'))&&[p.title,p.city,p.locality,p.id].join(' ').toLowerCase().includes(term));
+  propertyPage=Math.min(propertyPage,Math.max(0,Math.ceil(matches.length/24)-1));
+  const rows=matches.slice(propertyPage*24,propertyPage*24+24);
+  $('#properties-results').innerHTML=rows.length?`<div class="property-grid">${rows.map(p=>`<article class="property-card"><div class="property-cover">${cover(p)}${badge(p.demo?'Fictional demo':p.available?'Available':'Unavailable',p.demo?'amber':p.available?'green':'neutral')}<span class="property-ref">${esc(p.id)}${p.photos?.length?' · '+p.photos.length+' photos':''}</span></div><div class="property-content"><h3>${esc(p.title)}</h3><p>${esc([p.locality,p.city].filter(Boolean).join(', '))} · ${p.bedrooms} BHK${!p.available?' · Unavailable':''}</p><div class="property-price">${price(p.asking_price_inr)}<small>asking price</small></div><p>${esc(p.description.slice(0,100)||'No description added.')}</p></div><div class="property-footer"><span>Updated ${esc(date(p.verified_at))}</span><button class="button secondary" data-edit="${esc(p.id)}">View / edit ↗</button><button class="button primary" data-test-property="${esc(p.id)}" ${!p.available?'disabled':''}>Test this property ↗</button></div></article>`).join('')}</div>`:
     `<div class="card">${empty('properties',term?'No properties match your search':'Your inventory starts here',term?'Try another location or clear the filters.':'Add a verified listing. Your agent will be able to find and recommend it immediately.','', 'full-empty')}</div>`;
   document.querySelectorAll('[data-edit]').forEach(b=>b.addEventListener('click',()=>openProperty(state.properties.find(p=>p.id===b.dataset.edit))));
+  document.querySelectorAll('[data-test-property]').forEach(b=>b.addEventListener('click',()=>openLead(b.dataset.testProperty)));
+  $('#properties-results').insertAdjacentHTML('beforeend',`<div class="catalog-paging"><span>${matches.length} properties · Page ${propertyPage+1} of ${Math.max(1,Math.ceil(matches.length/24))}</span><button class="button secondary" id="property-prev" ${propertyPage===0?'disabled':''}>Previous</button><button class="button secondary" id="property-next" ${(propertyPage+1)*24>=matches.length?'disabled':''}>Next</button></div>`);
+  bind('#property-prev','click',()=>{propertyPage--;paintProperties();});bind('#property-next','click',()=>{propertyPage++;paintProperties();});
 }
 async function showTemplates() {
-  state.templates=await api('/property-templates');
-  $('#template-list').innerHTML=state.templates.map((p,index)=>`<article class="template-option"><div><h3>${esc(p.title)}</h3><p>${esc(p.locality)}, ${esc(p.city)} · ${p.bedrooms} BHK · ${price(p.asking_price)}</p><p>${esc(p.description)}</p></div><button class="button secondary" data-template="${index}">Use template ↗</button></article>`).join('');
-  document.querySelectorAll('[data-template]').forEach(b=>b.addEventListener('click',()=>{if(!state.status.demo_inventory_allowed||state.status.whatsapp_mode==='live'){toast('Demo templates require ALLOW_DEMO_DATA=true and simulation mode.');return;}const p=state.templates[Number(b.dataset.template)];$('#template-dialog').close();openProperty({...p,id:p.id+'-'+crypto.randomUUID().slice(0,5),asking_price_inr:p.asking_price},true);}));
-  $('#template-dialog').showModal();
+  $('#template-dialog .eyebrow').textContent=state.status.business_name+' · 500 fictional properties';
+  state.templates=await api('/property-templates');templatePage=0;$('#template-search').value='';
+  paintTemplates();$('#template-dialog').showModal();
 }
+function paintTemplates() {
+  const term=$('#template-search').value.toLowerCase().trim();
+  const rows=state.templates.filter(p=>[p.title,p.id,p.city,p.locality,p.bedrooms+' BHK',p.description,p.details?.housing_listing_id].join(' ').toLowerCase().includes(term));
+  templatePage=Math.min(templatePage,Math.max(0,Math.ceil(rows.length/20)-1));
+  $('#template-list').innerHTML=rows.slice(templatePage*20,templatePage*20+20).map(p=>`<article class="template-option"><div><h3>${esc(p.title)}</h3><p>${esc(p.id)} · ${esc(p.details?.housing_listing_id)}</p><p>${esc(p.locality)}, ${esc(p.city)} · ${p.bedrooms} BHK · ${price(p.asking_price)}</p><details class="import-source"><summary>View full property description & specifications</summary><p>${esc(p.description)}</p><dl>${Object.entries(p.details||{}).map(([k,v])=>`<dt>${esc(k.replaceAll('_',' '))}</dt><dd>${esc(v)}</dd>`).join('')}</dl></details><div class="catalog-paging"><button class="button primary" data-template-test="${esc(p.id)}">Test this property ↗</button><button class="button secondary" data-template="${esc(p.id)}">Use template ↗</button></div></div></article>`).join('')||'<p>No matching fictional templates.</p>';
+  $('#template-paging').innerHTML=`<span>${rows.length} templates · Page ${templatePage+1} of ${Math.max(1,Math.ceil(rows.length/20))}</span><button class="button secondary" id="template-prev" ${templatePage===0?'disabled':''}>Previous</button><button class="button secondary" id="template-next" ${(templatePage+1)*20>=rows.length?'disabled':''}>Next</button>`;
+  bind('#template-prev','click',()=>{templatePage--;paintTemplates();});bind('#template-next','click',()=>{templatePage++;paintTemplates();});
+  document.querySelectorAll('[data-template-test]').forEach(b=>b.addEventListener('click',()=>openLead(b.dataset.templateTest)));
+  document.querySelectorAll('[data-template]').forEach(b=>b.addEventListener('click',()=>{if(!state.status.demo_inventory_allowed||state.status.whatsapp_mode==='live'){toast('Demo templates require ALLOW_DEMO_DATA=true and simulation mode.');return;}const p=state.templates.find(p=>p.id===b.dataset.template);$('#template-dialog').close();const details={...p.details};delete details.housing_listing_id;openProperty({...p,details,id:p.id+'-'+crypto.randomUUID().slice(0,5),asking_price_inr:p.asking_price},true);}));
+}
+async function openLead(propertyId='') {
+  if(state.status.whatsapp_mode==='live'){toast('Switch to simulation mode to test a buyer enquiry.');return;}
+  state.properties=await api('/properties');
+  if(!state.templates.length)state.templates=await api('/property-templates');
+  const choices=new Map(state.properties.filter(p=>p.available).map(p=>[p.id,p]));
+  if(state.status.demo_inventory_allowed)for(const p of state.templates)if(!choices.has(p.id))choices.set(p.id,p);
+  if(propertyId&&!choices.has(propertyId)){toast('Enable demo inventory in simulation mode to test fictional templates.');return;}
+  $('#lead-form').reset();$('#lead-error').textContent='';
+  $('#lead-property').innerHTML='<option value="">General enquiry · no property selected</option>'+[...choices.values()].map(p=>`<option value="${esc(p.id)}" ${p.id===propertyId?'selected':''}>${esc(p.id)} · ${esc(p.title)}</option>`).join('');
+  $('#template-dialog').close();$('#property-dialog').close();$('#lead-dialog').showModal();
+}
+bind('#template-search','input',()=>{templatePage=0;paintTemplates();});
+bind('#close-lead','click',()=>$('#lead-dialog').close());
+bind('#lead-form','submit',async event=>{
+  event.preventDefault();$('#create-lead').disabled=true;$('#lead-error').textContent='';
+  try{
+    const buyer=$('#lead-buyer').value.trim();const property_id=$('#lead-property').value;
+    const session=await api('/test-sessions',{method:'POST',body:JSON.stringify({name:buyer+' · '+(property_id||'General enquiry'),buyer_name:buyer,property_id,listing_id:$('#lead-listing').value.trim()})});
+    state.testPhone=session.phone;sessionStorage.setItem('estate-test-phone',session.phone);$('#lead-dialog').close();
+    if(location.hash==='#test')await renderTest(state.nonce);else location.hash='test';
+  }catch(error){$('#lead-error').textContent=error.message;}finally{$('#create-lead').disabled=false;}
+});
 async function openProperty(property=null,fromTemplate=false) {
+  draftDetails=property?.details||null;
   const form=$('#property-form');form.reset();$('#property-error').textContent='';
+  form.elements.address.value=draftDetails?.address||'';
   draftFiles.forEach(item=>URL.revokeObjectURL(item.url));draftFiles=[];draftPhotos=fromTemplate?[]:(property?.photos||[]);draftPropertyId=fromTemplate?null:property?.id;
   $('#photo-upload-status').textContent='';$('#photo-previews').innerHTML='';
-  $('#property-extra-details').innerHTML=property?.details&&Object.keys(property.details).length?`<details class="import-source"><summary>Imported property details</summary><dl>${Object.entries(property.details).map(([key,value])=>`<dt>${esc(key.replaceAll('_',' '))}</dt><dd>${esc(value)}</dd>`).join('')}</dl><p class="text-small muted">Update these fields by re-importing the spreadsheet with the same property ID.</p></details>`:'';
+  $('#property-extra-details').innerHTML=property?.details&&Object.keys(property.details).length?`<details class="import-source"><summary>Property specifications</summary><dl>${Object.entries(property.details).map(([key,value])=>`<dt>${esc(key.replaceAll('_',' '))}</dt><dd>${esc(value)}</dd>`).join('')}</dl><p class="text-small muted">These saved specifications are available to the agent. Edit the description above for additional notes.</p></details>`:'';
   if(property?.import_source)$('#property-extra-details').innerHTML+=`<details class="import-source"><summary>Original sheet details · internal only</summary><p class="text-small muted">${esc(property.import_source.filename)} · ${esc(property.import_source.sheet)} · row ${esc(property.import_source.row)}. These source columns are not sent to the buyer-facing agent.</p><dl>${Object.entries(property.import_source.source_values||{}).map(([key,value])=>`<dt>${esc(key)}</dt><dd>${esc(value)}</dd>`).join('')}</dl></details>`;
+  $('#property-listing-ref').value=fromTemplate?'':(property?.housing_listing_ids?.[0]||'');
   $('#property-form-title').textContent=fromTemplate?'Create from template':property?'Edit property':'Add a property';
   form.elements.id.readOnly=Boolean(property)&&!fromTemplate;
   form.elements.demo.checked=Boolean(property?.demo);form.elements.demo.disabled=Boolean(property);
@@ -218,11 +313,20 @@ async function renderConversations(nonce) {
   await paintConversation(nonce);
 }
 function recommendationCards(properties) {
-  return `<div class="chat-property-grid">${properties.map(p=>`<article class="chat-property-card"><div class="property-cover">${cover(p)}${badge(p.demo?'Fictional demo':p.available?'Available':'Unavailable',p.demo?'amber':p.available?'green':'neutral')}</div><div class="property-content"><h3>${esc(p.title)}</h3><p>${esc(p.locality)}, ${esc(p.city)} · ${p.bedrooms} BHK</p><div class="property-price">${price(p.asking_price_inr)}<small>asking price</small></div><p>${esc(p.id)}</p><button type="button" class="button ghost" data-ask-property="${esc(p.id)}">Ask about this property ↗</button></div></article>`).join('')}</div>`;
+  return `<div class="chat-property-grid">${properties.map(p=>`<article class="chat-property-card"><div class="property-cover">${cover(p)}${badge(p.demo?'Fictional demo':p.available?'Available':'Unavailable',p.demo?'amber':p.available?'green':'neutral')}</div><div class="property-content"><h3>${esc(p.title)}</h3><p>${esc(p.locality)}, ${esc(p.city)} · ${p.bedrooms} BHK</p><div class="property-price">${price(p.asking_price_inr)}<small>asking price</small></div><p>${esc(p.id)}</p>${p.match_note?`<p class="related-note">${esc(p.match_note)}</p>`:''}<button type="button" class="button ghost" data-ask-property="${esc(p.id)}">Ask about this property ↗</button></div></article>`).join('')}</div>`;
 }
-function chatMessages(messages,recommendations=[]) {
+function chatMessages(messages,recommendations=[],outbox=[]) {
   const format = content => esc(content).replace(/\*\*([^\n]+?)\*\*/g,'<strong>$1</strong>').replace(/`([^`\n]+)`/g,'<code>$1</code>').replace(/^\*\s+/gm,'• ');
-  return messages.map(m=>{const rows=recommendations.filter(batch=>m.id==='reply:'+batch.source_message_id).flatMap(batch=>batch.properties);const unique=[...new Map(rows.map(p=>[p.id,p])).values()];return `<article class="chat-message ${m.role==='user'?'user':'assistant'}"><div class="chat-author">${m.role==='user'?'Buyer':'Estate AI · AI assistant'}</div><div class="chat-bubble">${m.role==='user'?esc(m.content):format(m.content)}</div><div class="chat-time">${esc(date(m.created))}</div></article>${unique.length?recommendationCards(unique):''}`;}).join('');
+  return messages.map(m=>{
+    const seen=new Set();
+    const groups=recommendations.filter(batch=>m.id==='reply:'+batch.source_message_id).map(batch=>{
+      const properties=batch.properties.filter(p=>{if(seen.has(p.id))return false;seen.add(p.id);return true;});
+      if(!properties.length)return '';
+      const label=batch.kind==='related'?'Related properties':batch.kind==='selected'?'Your selected property':'Properties found';
+      return `<section class="recommendation-group"><h4>${label}</h4>${batch.kind==='related'?`<p>Alternatives to ${esc(batch.source_property_id)} · locality and asking prices may differ</p>`:''}${recommendationCards(properties)}</section>`;
+    }).join('');
+    return `<article class="chat-message ${m.role==='user'?'user':'assistant'}"><div class="chat-author">${m.role==='user'?'Buyer':esc(state.status.business_name)+(m.author==='human'?' · Human team':' · AI assistant')}</div><div class="chat-bubble">${m.role==='user'?esc(m.content):format(m.content)}</div><div class="chat-time">${esc(date(m.created))}${m.author==='human'?' · '+esc(deliveryLabel(outbox.find(o=>o.message_id===m.id)?.state||'pending')):''}</div></article>${groups}`;
+  }).join('');
 }
 function insights(customer) {
   const p=customer?.preferences||{};
@@ -233,20 +337,61 @@ function proposalsView(proposals, confirm=false) {
   if(!proposals?.length)return '<p class="muted text-small">Budgets, offers and visit requests appear here after the agent records them.</p>';
   return proposals.map(p=>`<article class="proposal"><div class="proposal-top"><strong>${esc({budget:'Buyer budget',offer:'Property offer',visit:'Site-visit request'}[p.kind]||p.kind)}</strong>${badge(p.status==='buyer_confirmed'?'Buyer confirmed':p.status==='requested'?'Dealer review':'Needs confirmation',p.status==='buyer_confirmed'?'green':'amber')}</div><p>${p.kind==='visit'?esc(visitDate(p.details.start_time)):money(p.details.amount_inr)}${p.details.property_id?' · '+esc(p.details.property_id):''}</p><p>${p.kind==='offer'?'An offer from the buyer; not an agreed sale price.':p.kind==='visit'?'Availability and booking still need dealer approval.':'Budget is separate from any property asking price.'}</p>${confirm&&p.status==='pending_confirmation'?`<button class="button secondary" data-confirm="${esc(p.id)}">Confirm these details ↗</button>`:''}<p>Source: <code>${esc(p.source_message_id)}</code></p>${p.confirmation_message_id?`<p>Confirmed in: <code>${esc(p.confirmation_message_id)}</code></p>`:''}</article>`).join('');
 }
+function alertSummary(detail) {
+  if(String(detail).startsWith('Confirmed visit:'))return 'Buyer confirmed a visit request. Review the time and arrange team approval.';
+  try{const data=JSON.parse(detail);return data.reason||detail;}catch{return detail;}
+}
+function handoffView(detail) {
+  let data;try{data=JSON.parse(detail);}catch{return `<p>${esc(detail)}</p>`;}
+  if(!data.reason)return `<p>${esc(detail)}</p>`;
+  return `<div class="lead-context"><p><strong>${esc(data.reason)}</strong></p><p>${esc(data.buyer_name)} · ${esc(data.property_id||'General enquiry')} ${esc(data.listing_id||'')}</p><p>${esc(data.delivery)}</p>${(data.preferences_with_evidence||[]).map(p=>`<p>Buyer requirements: ${esc(Object.entries(p.values||{}).map(([k,v])=>k+': '+v).join(' · '))}</p>`).join('')}${(data.proposals||[]).map(p=>`<p>${esc(p.kind)} · ${esc(p.status)} · ${esc(p.details?.amount_inr?money(p.details.amount_inr):p.details?.start_time||'')} ${esc(p.details?.property_id||'')}</p>`).join('')}<details><summary>Recent conversation for your team</summary>${(data.recent_messages||[]).map(m=>`<p><strong>${esc(m.role==='user'?'Buyer':'Assistant')}:</strong> ${esc(m.text)}</p>`).join('')}</details></div>`;
+}
 function activityView(rows) {
   const relevant=rows.filter(a=>!['preferences','property_search_results'].includes(a.action));
-  return relevant.length?relevant.map(a=>`<div class="activity"><strong>${esc(a.action.replaceAll('_',' '))}</strong><p>${esc(date(a.created))}</p>${['dealer_alert','opt_out','human_takeover','automation_resumed'].includes(a.action)?`<p>${esc(a.detail)}</p>`:''}</div>`).join(''):'<p class="muted text-small">Tool calls and handoffs will appear here as the agent works.</p>';
+  return relevant.length?relevant.map(a=>`<div class="activity"><strong>${esc(a.action.replaceAll('_',' '))}</strong><p>${esc(date(a.created))}</p>${a.action==='dealer_alert'?handoffView(a.detail):['opt_out','human_takeover','automation_resumed'].includes(a.action)?`<p>${esc(a.detail)}</p>`:''}</div>`).join(''):'<p class="muted text-small">Tool calls and handoffs will appear here as the agent works.</p>';
+}
+function deliveryLabel(value) {
+  return ({pending:'Queued',sending:'Sending',simulated:'Simulated · stays in app',accepted:'Accepted by WhatsApp',sent:'Sent',delivered:'Delivered',read:'Read',delivery_unknown:'Delivery uncertain · review before retrying',suppressed:'Not sent'})[value]||value;
 }
 async function paintConversation(nonce) {
   const customer=state.customers.find(c=>c.phone===state.selectedPhone);
   if(!customer){$('#conversation-detail').innerHTML=empty('conversations','The context lives here','Select a conversation to explore its messages and buyer details.','','full-empty');return;}
-  const [conversation,activity]=await Promise.all([api('/conversations/'+customer.phone),api('/conversations/'+customer.phone+'/activity')]);
-  if(nonce!==state.nonce||state.page!=='conversations')return;
-  $('#conversation-detail').innerHTML=`<div class="detail-head">${avatar(customer.name)}<div><h2>${esc(customer.name)}</h2><p class="muted text-small">${customer.test?'Test session · ':''}${customer.opted_out?'Opted out':conversation.paused?'Automation paused':'AI replies enabled'}</p></div>${customer.opted_out?badge('Opted out','red'):button(conversation.paused?'Resume AI':'Take over','toggle-pause','secondary','human')}</div>
+  const phone=customer.phone;
+  const [conversation,activity]=await Promise.all([api('/conversations/'+phone),api('/conversations/'+phone+'/activity')]);
+  if(nonce!==state.nonce||state.page!=='conversations'||state.selectedPhone!==phone)return;
+  const focused=document.activeElement?.id==='human-reply-text';
+  const selection=focused?[$('#human-reply-text').selectionStart,$('#human-reply-text').selectionEnd]:null;
+  const draft=humanDrafts.get(phone)||{text:'',token:crypto.randomUUID()};humanDrafts.set(phone,draft);
+  const unavailable=conversation.opted_out?'This buyer opted out. Replies are blocked.':!conversation.paused?'Take over to reply yourself.':Date.now()/1000-conversation.last_inbound>=86400?'The reply window has closed. Wait for a new buyer message.':'Live WhatsApp is not enabled for this buyer.';
+  $('#conversation-detail').innerHTML=`<div class="detail-head">${avatar(customer.name)}<div><h2>${esc(customer.name)}</h2><p class="muted text-small">${customer.test?'Test session · ':''}${conversation.opted_out?'Opted out':conversation.paused?'With your team · AI paused':'AI replies enabled'}</p></div>${conversation.opted_out?badge('Opted out','red'):button(conversation.paused?'Resume AI':'Take over','toggle-pause','secondary','human')}</div>
+    ${customer.property_id?`<div class="inbox-property"><strong>Interested property</strong> ${esc(customer.property_title)} · ${esc(customer.property_id)}</div>`:''}
     <div class="details-tabs">${[['messages','Messages'],['profile','Buyer details'],['activity','Activity & handoffs']].map(([key,label])=>`<button data-tab="${key}" class="${state.conversationTab===key?'selected':''}">${label}</button>`).join('')}</div>
-    ${state.conversationTab==='messages'?`<div class="chat-history">${conversation.messages.length?chatMessages(conversation.messages):empty('conversations','Waiting for the first hello','No messages in this conversation yet.')}</div>`:state.conversationTab==='profile'?`<div class="card-body">${insights(customer)}<h3 style="margin:22px 0 13px">Budgets, offers & visit requests</h3>${proposalsView(customer.proposals)}</div>`:`<div class="card-body">${activityView(activity)}</div>`}`;
-  document.querySelectorAll('[data-tab]').forEach(b=>b.addEventListener('click',()=>{state.conversationTab=b.dataset.tab;paintConversation(state.nonce).catch(e=>toast(e.message));}));
-  bind('#toggle-pause','click',async()=>{await api('/conversations/'+customer.phone+(conversation.paused?'/resume':'/takeover'),{method:'POST'});toast(conversation.paused?'AI resumed for future messages.':'Conversation paused for human follow-up.');await renderConversations(state.nonce);});
+    ${state.conversationTab==='messages'?`<div class="chat-history" id="conversation-history">${conversation.messages.length?chatMessages(conversation.messages,[],conversation.outbox):empty('conversations','Waiting for the first hello','No messages in this conversation yet.')}</div><div class="human-compose"><div class="human-compose-head"><strong>Reply as ${esc(state.status.business_name)}</strong>${badge(customer.test?'App simulation':'WhatsApp',customer.test?'amber':'green')}</div><p>${customer.test?'Your reply appears in this test chat. Nothing is sent to WhatsApp.':'Your reply will be sent to this buyer on WhatsApp.'} AI remains paused until you resume it.</p>${conversation.manual_reply_available?`<form id="human-reply-form"><label class="sr-only" for="human-reply-text">Reply to buyer</label><textarea id="human-reply-text" aria-label="Reply to buyer" rows="3" maxlength="4000" required placeholder="Write your reply to the buyer…">${esc(draft.text)}</textarea><div class="human-compose-actions"><small>Human team reply · up to 4,000 characters</small><button type="submit" class="button primary" id="send-human-reply">${customer.test?'Send test reply':'Send WhatsApp reply'} ↗</button></div></form>`:`<div class="notice">${esc(unavailable)}</div>`}<p class="error-text" id="human-reply-error" role="alert"></p></div>`:state.conversationTab==='profile'?`<div class="card-body">${insights(customer)}<h3 style="margin:22px 0 13px">Budgets, offers & visit requests</h3>${proposalsView(customer.proposals)}</div>`:`<div class="card-body">${activityView(activity)}</div>`}`;
+  document.querySelectorAll('[data-tab]').forEach(b=>b.addEventListener('click',()=>{state.conversationTab=b.dataset.tab;paintConversation(nonce).catch(e=>toast(e.message));}));
+  bind('#toggle-pause','click',async()=>{await api('/conversations/'+phone+(conversation.paused?'/resume':'/takeover'),{method:'POST'});toast(conversation.paused?'AI resumed for future messages.':'Conversation taken over. You can now reply.');await renderConversations(nonce);});
+  bind('#human-reply-text','input',event=>{draft.text=event.target.value;draft.token=crypto.randomUUID();});
+  bind('#human-reply-form','submit',async event=>{
+    event.preventDefault();if(state.humanSending)return;state.humanSending=true;
+    $('#send-human-reply').disabled=true;$('#human-reply-error').textContent='';
+    try{const result=await api('/conversations/'+phone+'/reply',{method:'POST',body:JSON.stringify({text:draft.text,event_id:draft.token})});humanDrafts.delete(phone);toast(result.channel==='simulate'?'Test reply queued. It stays in the app.':'Your reply is queued for WhatsApp.');await paintConversation(nonce);}
+    catch(error){if($('#human-reply-error'))$('#human-reply-error').textContent=error.message;}
+    finally{state.humanSending=false;if($('#send-human-reply'))$('#send-human-reply').disabled=false;}
+  });
+  const history=$('#conversation-history');if(history)history.scrollTop=history.scrollHeight;
+  if(focused&&$('#human-reply-text')){$('#human-reply-text').focus();$('#human-reply-text').setSelectionRange(...selection);}
+  scheduleConversation(nonce,phone,JSON.stringify([conversation,activity]));
+}
+function scheduleConversation(nonce,phone,snapshot) {
+  clearTimeout(state.timer);
+  state.timer=setTimeout(async()=>{
+    if(state.page!=='conversations'||nonce!==state.nonce||phone!==state.selectedPhone)return;
+    try{
+      if(state.humanSending){scheduleConversation(nonce,phone,snapshot);return;}
+      const latest=await Promise.all([api('/conversations/'+phone),api('/conversations/'+phone+'/activity')]);
+      if(JSON.stringify(latest)!==snapshot)await paintConversation(nonce);
+      else scheduleConversation(nonce,phone,snapshot);
+    }catch(error){if(state.page==='conversations'&&nonce===state.nonce)scheduleConversation(nonce,phone,snapshot);}
+  },4000);
 }
 async function renderTest(nonce) {
   state.testSessions=await api('/test-sessions');if(nonce!==state.nonce)return;
@@ -255,9 +400,9 @@ async function renderTest(nonce) {
   if(!state.testSessions.some(s=>s.phone===state.testPhone))state.testPhone=state.testSessions[0]?.phone;
   if(state.testPhone)sessionStorage.setItem('estate-test-phone',state.testPhone);
   $('#content').innerHTML=heading('A conversation is the best test.','Meet your real agent. Explore its answers, tools and understanding.',button('New conversation','new-test','secondary'))+
-    `<div class="test-layout"><section class="card test-chat"><div class="card-head"><div><h2>${icon('test')} Estate AI assistant</h2><p>${esc(state.status.model)} · via Ollama</p></div><select class="session-select" id="test-session-select" aria-label="Select test conversation">${state.testSessions.map(s=>`<option value="${s.phone}" ${s.phone===state.testPhone?'selected':''}>${esc(s.name)}</option>`).join('')}</select></div><div class="test-banner">${icon('test')}Real agent & tools · Test messages stay here. Nothing is sent to WhatsApp.</div><div id="test-history" class="chat-history"></div><div id="recommendation-controls" class="recommendation-controls"></div><div id="thinking" class="thinking" hidden>Agent is thinking and checking its tools…</div><div class="chat-compose"><form id="chat-form"><textarea id="chat-input" aria-label="Message your agent" rows="2" maxlength="4000" placeholder="Ask about a property, share a budget, or request a visit…" required></textarea><button class="button primary" id="send-message" type="submit" aria-label="Send message">${icon('send')}</button></form><small>Enter to send · Shift + Enter for a new line · Synthetic buyer session</small><p id="chat-error" class="error-text" role="alert"></p></div></section>
+    `<div class="test-layout"><section class="card test-chat"><div class="card-head"><div><h2>${icon('test')} ${esc(state.status.business_name)} assistant</h2><p>${esc(state.status.model)} · via Ollama</p></div><select class="session-select" id="test-session-select" aria-label="Select test conversation">${state.testSessions.map(s=>`<option value="${s.phone}" ${s.phone===state.testPhone?'selected':''}>${esc(s.name)}</option>`).join('')}</select></div><div class="test-banner">${icon('test')}Real agent & tools · Test messages stay here. Nothing is sent to WhatsApp.</div><div id="test-history" class="chat-history"></div><div id="recommendation-controls" class="recommendation-controls"></div><div id="thinking" class="thinking" hidden>Agent is thinking and checking its tools…</div><div class="chat-compose"><form id="chat-form"><textarea id="chat-input" aria-label="Message your agent" rows="2" maxlength="4000" placeholder="Ask about a property, share a budget, or request a visit…" required></textarea><button class="button primary" id="send-message" type="submit" aria-label="Send message">${icon('send')}</button></form><small>Enter to send · Shift + Enter for a new line · Synthetic buyer session</small><p id="chat-error" class="error-text" role="alert"></p></div></section>
     <aside class="test-context card-stack"><section class="card"><div class="card-head"><div><h2>What your agent knows</h2><p>Saved buyer requirements</p></div>${icon('human')}</div><div class="card-body" id="test-insights"></div></section><section class="card"><div class="card-head"><h2>Confirmations & requests</h2></div><div class="card-body" id="test-proposals"></div></section><section class="card"><div class="card-head"><div><h2>Agent activity</h2><p>Actual tool calls and handoffs</p></div></div><div class="card-body" id="test-activity"></div></section></aside></div>`;
-  bind('#new-test','click',async()=>{const s=await api('/test-sessions',{method:'POST',body:JSON.stringify({name:'Test conversation '+(state.testSessions.length+1)})});state.testPhone=s.phone;sessionStorage.setItem('estate-test-phone',s.phone);await renderTest(state.nonce);});
+  bind('#new-test','click',()=>openLead());
   bind('#test-session-select','change',async event=>{state.testPhone=event.target.value;sessionStorage.setItem('estate-test-phone',state.testPhone);await loadTestData();if(state.pending[state.testPhone])pollTest();});
   bind('#chat-form','submit',async event=>{event.preventDefault();await sendTestMessage($('#chat-input').value.trim());});
   bind('#chat-input','keydown',event=>{if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing){event.preventDefault();$('#chat-form').requestSubmit();}});
@@ -273,22 +418,29 @@ async function loadTestData() {
   if(waiting)state.pending[phone]=waiting.id;
   const customer=customers.find(c=>c.phone===phone);
   const history=$('#test-history');const nearBottom=history.scrollHeight-history.scrollTop-history.clientHeight<90;
-  history.innerHTML=conversation.messages.length?chatMessages(conversation.messages,recommendations.batches):empty('test','Say hello to your agent','Start like a buyer would. Your agent can search inventory, remember requirements and prepare visit requests.',`<div class="suggestions"><button class="suggestion" data-prompt="Hi, I’m looking for a 3 BHK in Mohali.">Find a home in Mohali</button><button class="suggestion" data-prompt="My budget is 90 lakh.">Share a budget</button><button class="suggestion" data-prompt="What properties do you have available?">Explore available properties</button></div>`);
+  history.innerHTML=conversation.messages.length?chatMessages(conversation.messages,recommendations.batches,conversation.outbox):empty('test','Say hello to your agent','Start like a buyer would. Your agent can search inventory, remember requirements and prepare visit requests.',`<div class="suggestions"><button class="suggestion" data-prompt="Hi, I’m looking for a 3 BHK in Mohali.">Find a home in Mohali</button><button class="suggestion" data-prompt="My budget is 90 lakh.">Share a budget</button><button class="suggestion" data-prompt="What properties do you have available?">Explore available properties</button></div>`);
+  if(!conversation.messages.length&&state.testSessions.find(s=>s.phone===phone)?.property_id){history.innerHTML=empty('test','Your property context is ready','Say Hi. Your company’s AI assistant already knows your test name and selected property.',`<button class="suggestion" data-prompt="Hi">Say Hi</button>`);}
   if(nearBottom||state.pending[phone])history.scrollTop=history.scrollHeight;
-  $('#test-insights').innerHTML=insights(customer);
+  const lead=state.testSessions.find(s=>s.phone===phone);
+  $('#test-insights').innerHTML=(lead?.property_id?`<div class="lead-context"><strong>Buyer: ${esc(lead.buyer_name||customer?.name)}</strong><p>Interested in ${esc(lead.property?.title||lead.property_id)}</p><p>${esc(lead.property_id)} · ${esc(lead.listing_id||'Manual property selection')}</p><small>Simulated lead · ${esc(state.status.business_name)} AI assistant</small></div>`:'')+insights(customer);
   $('#test-proposals').innerHTML=proposalsView(customer?.proposals,true);
   $('#test-activity').innerHTML=activityView(activity);
   const paused=conversation.paused||conversation.opted_out;
   const blocked=Boolean(state.pending[phone])||paused||state.status.whatsapp_mode==='live';
-  $('#recommendation-controls').innerHTML=`${recommendations.has_search?`<button class="button secondary" id="more-properties" ${blocked||!recommendations.has_more?'disabled':''}>Show more matches ↗</button>`:''}<button class="button ghost" id="browse-properties" ${blocked?'disabled':''}>Browse all inventory ↗</button>${recommendations.has_search&&!recommendations.has_more?'<small>No unseen matches for the current search. Ask to adjust your criteria, or browse all inventory.</small>':''}`;
+  const relatedMode=recommendations.batches.at(-1)?.kind==='related';
+  const hasRelated=recommendations.batches.some(b=>b.kind==='related');
+  $('#recommendation-controls').innerHTML=`${lead?.property_id?`<button class="button secondary" id="related-properties" ${blocked||(relatedMode&&!recommendations.has_more)?'disabled':''}>${hasRelated?'More related properties':'Show related properties'} ↗</button>`:''}${recommendations.has_search&&!relatedMode?`<button class="button secondary" id="more-properties" ${blocked||!recommendations.has_more?'disabled':''}>Show more matches ↗</button>`:''}<button class="button ghost" id="browse-properties" ${blocked?'disabled':''}>Browse all inventory ↗</button>${recommendations.has_search&&!recommendations.has_more?`<small>${relatedMode?'No unseen related homes remain in the same city, BHK and price range. Ask to adjust the criteria.':'No unseen matches for the current search. Ask to adjust your criteria, or browse all inventory.'}</small>`:''}`;
+  bind('#related-properties','click',()=>queuePropertyAction('related'));
   bind('#more-properties','click',()=>queuePropertyAction('more'));
   bind('#browse-properties','click',()=>queuePropertyAction('browse'));
-  $('#send-message').disabled=Boolean(state.pending[phone])||paused||state.status.whatsapp_mode==='live';
+  $('#send-message').disabled=Boolean(state.pending[phone])||conversation.opted_out||state.status.whatsapp_mode==='live';
   $('#thinking').hidden=!state.pending[phone];
-  $('#chat-error').textContent=conversation.opted_out?'This test buyer opted out. Start a new conversation.':paused?'AI is paused after a handoff. Resume it in Conversations or start a new test.':'';
+  $('#thinking').textContent=paused?'Saving buyer message…':'Agent is thinking and checking its tools…';
+  $('#chat-error').textContent=conversation.opted_out?'This test buyer opted out. Start a new conversation.':paused?'AI is paused. You can still send buyer messages here. Reply as the company from Conversations, or resume AI there.':'';
   document.querySelectorAll('[data-prompt]').forEach(b=>b.addEventListener('click',()=>{ $('#chat-input').value=b.dataset.prompt;$('#chat-input').focus();}));
   document.querySelectorAll('[data-confirm]').forEach(b=>b.addEventListener('click',()=>sendTestMessage('CONFIRM '+b.dataset.confirm).catch(e=>toast(e.message))));
   document.querySelectorAll('[data-ask-property]').forEach(b=>b.addEventListener('click',()=>{$('#chat-input').value='Tell me more about property '+b.dataset.askProperty;$('#chat-input').focus();}));
+  if(conversation.paused&&!state.pending[phone]){clearTimeout(state.timer);state.timer=setTimeout(()=>{if(state.page==='test'&&state.testPhone===phone)loadTestData().catch(error=>toast(error.message));},4000);}
 }
 async function queuePropertyAction(action) {
   const phone=state.testPhone;if(!phone||state.pending[phone])return;
@@ -321,22 +473,29 @@ function pollTest() {
 async function renderSettings(nonce) {
   if(nonce!==state.nonce)return;const s=state.status;
   const setting=(label,value)=>`<div class="setting-row"><span>${esc(label)}</span><code>${esc(value)}</code></div>`;
-  $('#content').innerHTML=heading('The essentials behind your agent.','Model configuration and integration status. Everything in plain sight.',badge('Configuration · read only'))+
+  $('#content').innerHTML=heading('The essentials behind your agent.','Model configuration and integration status. Everything in plain sight.',badge('Company identity · editable'))+
     `<div class="settings-grid"><div class="card-stack"><section class="card"><div class="card-head"><div><h2>AI model</h2><p>The engine behind every conversation</p></div>${badge('Ollama','green')}</div><div class="card-body"><div class="settings-rows">${setting('Model',s.model)}${setting('API endpoint',s.ollama_base_url)}${setting('Authentication',s.ollama_api_key_required?(s.ollama_api_key_configured?'API key configured':'API key missing'):'Local Ollama · signed-in account')}${setting('Separate API key',s.ollama_api_key_required?'Required':'Not required for localhost')}${setting('Background worker',s.worker_enabled?'Enabled':'Disabled')}</div><div style="margin-top:20px">${button('Check connection','check-ollama','secondary','arrow')}</div><div id="connection-check" aria-live="polite"></div><p class="settings-note">Connection checks reach the configured endpoint and look for this model. They do not verify inference or cloud sign-in. Test Your Agent exercises the real model.</p></div></section>
-    <section class="card"><div class="card-head"><h2>Workspace</h2></div><div class="card-body settings-rows">${setting('Business name',s.business_name)}${setting('Business timezone',s.timezone)}${setting('Database',s.database)}${setting('Demo inventory permission',s.demo_inventory_allowed?'Allowed in simulation':'Disabled')}</div></section></div>
+    <section class="card"><div class="card-head"><h2>Workspace</h2></div><div class="card-body settings-rows"><form id="company-form"><label>Company name<input id="company-name" required maxlength="120" value="${esc(s.business_name)}"></label><p class="muted text-small">Used in new AI replies and handoff messages. Existing conversation history stays unchanged.</p><button type="submit" class="button secondary" id="save-company">Save company name ↗</button><p id="company-result" role="status"></p></form>${setting('Business timezone',s.timezone)}${setting('Database',s.database)}${setting('Demo inventory permission',s.demo_inventory_allowed?'Allowed in simulation':'Disabled')}</div></section></div>
     <div class="card-stack"><section class="card"><div class="card-head"><div><h2>Integrations</h2><p>Configured does not always mean connected</p></div></div><div class="card-body"><div class="integration"><span class="integration-icon">${icon('test')}</span><div><h3>Ollama</h3><p id="ollama-integration-note">${s.ollama_configured?'Configured · connection not checked':'Configuration incomplete'}</p></div><span id="ollama-integration-badge">${badge('Not checked')}</span></div><div class="integration"><span class="integration-icon">${icon('conversations')}</span><div><h3>WhatsApp</h3><p>${s.whatsapp_mode==='simulate'?'Test conversations only · no messages sent':s.whatsapp_credentials_configured?'Credentials configured · delivery not verified':'Credentials missing'}</p></div>${badge(s.whatsapp_mode==='simulate'?'Simulation':'Live mode',s.whatsapp_mode==='simulate'?'amber':'blue')}</div><div class="integration"><span class="integration-icon">${icon('visit')}</span><div><h3>Google Calendar</h3><p>Visits are requests pending dealer approval</p></div>${badge('Not connected')}</div><div class="integration"><span class="integration-icon">${icon('properties')}</span><div><h3>99acres & Housing.com</h3><p>Lead-source adapters are planned</p></div>${badge('Not connected')}</div></div></section>
     <section class="card"><div class="card-head"><h2>Change your configuration</h2></div><div class="card-body"><p class="muted text-small">Edit your local <code>.env</code> file and restart the backend to change the model, endpoint or integration settings. Credentials are never displayed on this page.</p><div class="notice" style="margin:18px 0 0">Your current agent uses a configurable model connection. When you’re ready to deploy, you can switch the endpoint and model, or add another provider adapter.</div></div></section></div></div>`;
+  bind('#company-form','submit',async event=>{event.preventDefault();$('#save-company').disabled=true;try{const saved=await api('/settings/company',{method:'PUT',body:JSON.stringify({business_name:$('#company-name').value.trim()})});state.status.business_name=saved.business_name;$('.workspace-label strong').textContent=saved.business_name;$('.workspace-avatar').textContent=saved.business_name.trim().split(/\s+/).slice(0,2).map(part=>part[0]).join('').toUpperCase();$('#company-result').textContent='Saved. New replies use '+saved.business_name+'.';}catch(error){$('#company-result').textContent=error.message;}finally{$('#save-company').disabled=false;}});
   bind('#check-ollama','click',async()=>{const b=$('#check-ollama');b.disabled=true;b.textContent='Checking connection…';try{const result=await api('/integrations/ollama/check',{method:'POST'});if(state.page!=='settings')return;$('#connection-check').className='connection-result'+(!result.reachable||!result.model_available?' bad':'');$('#connection-check').textContent=result.message;$('#ollama-integration-badge').innerHTML=badge(result.reachable?(result.model_available?'Reachable':'Model not listed'):'Unreachable',result.reachable&&result.model_available?'green':'amber');$('#ollama-integration-note').textContent=result.reachable?'Endpoint checked just now':'Start Ollama and try again';}finally{if(state.page==='settings'){b.disabled=false;b.innerHTML=icon('arrow')+'Check connection';}}});
 }
 bind('#property-form','submit',async event=>{
   event.preventDefault();const form=event.currentTarget;const values=new FormData(form);
   const body={id:values.get('id').trim(),title:values.get('title').trim(),city:values.get('city').trim(),locality:values.get('locality').trim(),bedrooms:Number(values.get('bedrooms')),asking_price:Number(values.get('asking_price')),description:values.get('description').trim(),available:form.elements.available.checked,demo:form.elements.demo.checked};
+  const address=values.get('address').trim();
+  if(draftDetails||address){
+    body.details={...draftDetails};
+    if(address)body.details.address=address;
+    else delete body.details.address;
+  }
   $('#save-property').disabled=true;$('#property-error').textContent='';
   let propertySaved=false;
-  try{const saved=await api('/properties/'+encodeURIComponent(body.id),{method:'PUT',body:JSON.stringify(body)});propertySaved=true;draftPropertyId=body.id;draftPhotos=saved.photos||[];form.elements.id.readOnly=true;form.elements.demo.disabled=true;
+  try{const saved=await api('/properties/'+encodeURIComponent(body.id),{method:'PUT',body:JSON.stringify(body)});propertySaved=true;const listingRef=$('#property-listing-ref').value.trim();if(listingRef)await api('/housing-listings/'+encodeURIComponent(listingRef),{method:'PUT',body:JSON.stringify({property_id:body.id})});draftPropertyId=body.id;draftPhotos=saved.photos||[];form.elements.id.readOnly=true;form.elements.demo.disabled=true;
     while(draftFiles.length){const item=draftFiles[0];$('#photo-upload-status').textContent=`Uploading ${item.file.name}…`;const photo=await api('/properties/'+encodeURIComponent(body.id)+'/photos',{method:'POST',body:item.file,headers:{'Content-Type':item.file.type||'application/octet-stream'}});draftFiles.shift();URL.revokeObjectURL(item.url);if(!draftPhotos.some(p=>p.id===photo.id))draftPhotos.push(photo);await loadPhoto(photo);paintDraftPhotos();}
     $('#property-dialog').close();toast('Property and photos saved. Your agent can use the updated details.');if(state.page==='properties')await renderProperties(state.nonce);
-  }catch(error){$('#property-error').textContent=(propertySaved?'Property saved, but a photo could not be uploaded: ':'')+error.message;$('#photo-upload-status').textContent='Uploaded photos are retained. Retry Save property to upload the remaining photos.';}finally{$('#save-property').disabled=false;}
+  }catch(error){$('#property-error').textContent=(propertySaved?'Property saved, but a listing link or photo could not be saved: ':'')+error.message;$('#photo-upload-status').textContent='Saved property data and uploaded photos are retained. Correct the error and retry Save property.';}finally{$('#save-property').disabled=false;}
 });
 bind('#property-photo-input','change',event=>{
   for(const file of event.target.files){if(draftPhotos.length+draftFiles.length>=10){toast('A property can have up to 10 photos.');break;}if(!['image/jpeg','image/png','image/webp'].includes(file.type)||file.size>8*1024*1024){toast('Choose JPEG, PNG or WebP photos no larger than 8 MB each.');continue;}draftFiles.push({file,url:URL.createObjectURL(file)});}
@@ -346,7 +505,9 @@ bind('#close-property','click',()=>$('#property-dialog').close());bind('#cancel-
 bind('#close-templates','click',()=>$('#template-dialog').close());
 bind('#login-dialog','cancel',event=>event.preventDefault());
 bind('#login-form','submit',async event=>{event.preventDefault();state.key=$('#admin-key').value.trim();$('#login-error').textContent='';try{await api('/status');sessionStorage.setItem('estate-admin',state.key);$('#admin-key').value='';$('#login-dialog').close();await navigate();}catch(error){$('#login-error').textContent=error.message;}});
-bind('#lock-workspace','click',()=>{clearTimeout(state.timer);state.key='';sessionStorage.removeItem('estate-admin');navigate();});
+function lockWorkspace(){clearTimeout(state.timer);state.key='';sessionStorage.removeItem('estate-admin');navigate();}
+bind('#lock-workspace','click',lockWorkspace);
+bind('#mobile-lock-workspace','click',lockWorkspace);
 bind('#refresh','click',()=>navigate());
 window.addEventListener('hashchange',navigate);
 navigate();

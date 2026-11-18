@@ -303,7 +303,7 @@ def validate_rows(session, payload, options):
                 else "",
                 "demo": options.demo,
             }
-            normalized = PropertyInput.model_validate(core).model_dump()
+            normalized = PropertyInput.model_validate(core).model_dump(exclude={"details"})
             if existing and not options.update_existing:
                 raise ValueError("Property ID already exists. Enable 'Update existing IDs' to update it")
             if existing and existing.demo != options.demo:

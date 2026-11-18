@@ -3,7 +3,18 @@ from datetime import UTC, datetime, timedelta
 
 from pydantic import BaseModel, ValidationError
 
-from estate_ai.db import Audit, Customer, Property, PropertyMetadata, PropertyPhoto, Proposal, now
+from estate_ai.db import (
+    Audit,
+    Customer,
+    Message,
+    Property,
+    PropertyListing,
+    PropertyMetadata,
+    PropertyPhoto,
+    Proposal,
+    TestSession,
+    now,
+)
 from estate_ai.document_query import load_only, object_session, select
 from estate_ai.photos import photo_data
 from estate_ai.schemas import (
@@ -11,12 +22,13 @@ from estate_ai.schemas import (
     PreferenceArgs,
     PriceArgs,
     PropertyArgs,
+    RelatedArgs,
     SearchArgs,
     VisitArgs,
 )
 
 
-def property_data(row: Property, include_internal: bool = False) -> dict:
+def property_data(row: Property, include_internal: bool = False, related: dict | None = None) -> dict:
     session = object_session(row)
     photos = (
         list(
@@ -27,10 +39,18 @@ def property_data(row: Property, include_internal: bool = False) -> dict:
                 .order_by(PropertyPhoto.created)
             )
         )
-        if session
+        if session and related is None
         else []
     )
-    metadata = session.get(PropertyMetadata, row.id) if session else None
+    if related is not None:
+        photos = related["photos"].get(row.id, [])
+    metadata = (
+        related["metadata"].get(row.id)
+        if related is not None
+        else session.get(PropertyMetadata, row.id)
+        if session
+        else None
+    )
     source = json.loads(metadata.payload) if metadata else {}
     result = {
         "id": row.id,
@@ -49,7 +69,31 @@ def property_data(row: Property, include_internal: bool = False) -> dict:
     }
     if include_internal and source:
         result["import_source"] = {key: value for key, value in source.items() if key != "details"}
+    if include_internal:
+        mappings = (
+            related["listings"].get(row.id, [])
+            if related is not None
+            else (
+                list(session.scalars(select(PropertyListing).where(PropertyListing.property_id == row.id)))
+                if session
+                else []
+            )
+        )
+        result["housing_listing_ids"] = [mapping.id for mapping in mappings]
     return result
+
+
+def related_note(row: Property, anchor: Property) -> str:
+    location = (
+        "Same locality" if row.locality.casefold() == anchor.locality.casefold() else "Different locality"
+    )
+    difference = row.asking_price - anchor.asking_price
+    price = (
+        "Same asking price as selected property"
+        if difference == 0
+        else f"INR {abs(difference):,} {'higher' if difference > 0 else 'lower'} asking price than selected property"
+    )
+    return f"Same city · {row.bedrooms} BHK · {location} · {price}"
 
 
 TOOL_SPECS: dict[str, tuple[type[BaseModel], str]] = {
@@ -62,6 +106,14 @@ TOOL_SPECS: dict[str, tuple[type[BaseModel], str]] = {
         ),
     ),
     "get_property_details": (PropertyArgs, "Read inventory facts and price verification time."),
+    "find_related_properties": (
+        RelatedArgs,
+        (
+            "Find related available homes for a property ID, or the buyer's selected property if omitted. "
+            "Same city and BHK, within 20% of its asking price and within the buyer's stated budget if known. "
+            "Exclude already seen listings by default. Never silently widen the criteria."
+        ),
+    ),
     "save_preferences": (PreferenceArgs, "Record nonfinancial requirements explicitly stated by this buyer."),
     "propose_price_confirmation": (
         PriceArgs,
@@ -169,6 +221,129 @@ class ToolService:
     def get_property_details(self, args: PropertyArgs):
         return property_data(self.property(args.property_id))
 
+    def related_candidates(self, args: RelatedArgs):
+        context = self.session.get(TestSession, self.phone)
+        property_id = args.property_id or (context.property_id if context else "")
+        if not property_id:
+            raise ValueError("Choose a property first so I can find related homes")
+        anchor = self.property(property_id)
+        ceiling, floor = anchor.asking_price * 120 // 100, anchor.asking_price * 80 // 100
+        budget = self.session.scalar(
+            select(Proposal)
+            .where(
+                Proposal.phone == self.phone,
+                Proposal.kind == "budget",
+                Proposal.status.in_(["pending_confirmation", "buyer_confirmed"]),
+            )
+            .order_by(Proposal.created.desc())
+            .limit(1)
+        )
+        stated_budget = json.loads(budget.payload).get("amount_inr") if budget else None
+        if stated_budget:
+            ceiling = min(ceiling, stated_budget)
+        query = select(Property).where(
+            Property.available.is_(True),
+            Property.demo == anchor.demo,
+            Property.city.ilike(anchor.city),
+            Property.bedrooms == anchor.bedrooms,
+            Property.asking_price <= ceiling,
+        )
+        seen = {anchor.id}
+        if args.exclude_seen:
+            for detail in self.session.scalars(
+                select(Audit.detail).where(
+                    Audit.phone == self.phone, Audit.action == "property_search_results"
+                )
+            ):
+                seen.update(json.loads(detail).get("property_ids", []))
+        rows = [
+            row for row in self.session.scalars(query) if row.id not in seen and row.asking_price >= floor
+        ]
+        rows.sort(
+            key=lambda row: (
+                row.locality.casefold() != anchor.locality.casefold(),
+                abs(row.asking_price - anchor.asking_price),
+                row.id,
+            )
+        )
+        return (
+            anchor,
+            rows,
+            {
+                "city": anchor.city,
+                "bedrooms": anchor.bedrooms,
+                "min_price_inr": floor,
+                "max_price_inr": ceiling,
+                "stated_budget_inr": stated_budget,
+            },
+        )
+
+    def find_related_properties(self, args: RelatedArgs):
+        anchor, candidates, basis = self.related_candidates(args)
+        properties = [
+            {**property_data(row), "match_note": related_note(row, anchor)}
+            for row in candidates[: args.limit]
+        ]
+        self.session.add(
+            Audit(
+                phone=self.phone,
+                action="property_search_results",
+                detail=json.dumps(
+                    {
+                        "kind": "related",
+                        "source_property_id": anchor.id,
+                        "property_ids": [p["id"] for p in properties],
+                        "source_message_id": self.message_id,
+                        "basis": basis,
+                        "filters": {
+                            "city": anchor.city,
+                            "bedrooms": anchor.bedrooms,
+                            "max_price": basis["max_price_inr"],
+                        },
+                    }
+                ),
+            )
+        )
+        return {
+            "properties": properties,
+            "source_property_id": anchor.id,
+            "basis": basis,
+            "has_more": len(candidates) > args.limit,
+            "note": "Related to the selected listing, not proof of the buyer's preferences. "
+            "No city, size or price range was widened. Fictional listings remain fictional.",
+        }
+
+    def related_properties(self):
+        result = self.execute("find_related_properties", {})
+        if "error" in result:
+            return result["error"]
+        basis = result["basis"]
+        if basis["max_price_inr"] < basis["min_price_inr"]:
+            return (
+                f"Your stated budget of INR {basis['stated_budget_inr']:,} is below the similar-price "
+                f"range for {result['source_property_id']} (starting at INR {basis['min_price_inr']:,}). "
+                "I haven't shown above-budget homes. Would you like to search a lower price range instead?"
+            )
+        criteria = (
+            f"{basis['bedrooms']} BHK in {basis['city']}, asking price "
+            f"INR {basis['min_price_inr']:,}–{basis['max_price_inr']:,}"
+        )
+        if not result["properties"]:
+            return (
+                f"There are no more unseen related homes for {result['source_property_id']} "
+                f"with these criteria: {criteria}. I haven't widened the search. "
+                "Would you like to change the price range, location or bedrooms?"
+            )
+        lines = [f"Here are related homes for {result['source_property_id']}: {criteria}."]
+        for p in result["properties"]:
+            label = "Fictional demo · " if p["demo"] else ""
+            lines.append(
+                f"{label}{p['id']} — {p['title']}, {p['locality']}. "
+                f"Asking price INR {p['asking_price_inr']:,}. {p['match_note']}."
+            )
+        lines.append("Asking prices are not agreed sale prices. Which home would you like to explore?")
+        return "\n\n".join(lines)
+
     def more_properties(self):
         detail = self.session.scalar(
             select(Audit.detail)
@@ -267,7 +442,46 @@ class ToolService:
 
     def request_human_handoff(self, args: HandoffArgs):
         self.session.get(Customer, self.phone).paused = True
-        self.session.add(Audit(phone=self.phone, action="dealer_alert", detail=args.reason))
+        test = self.session.get(TestSession, self.phone)
+        messages = list(
+            self.session.scalars(
+                select(Message)
+                .where(Message.phone == self.phone)
+                .order_by(Message.created.desc(), Message.id.desc())
+                .limit(8)
+            )
+        )
+        preferences = list(
+            self.session.scalars(
+                select(Audit.detail)
+                .where(Audit.phone == self.phone, Audit.action == "preferences")
+                .order_by(Audit.created.desc())
+                .limit(5)
+            )
+        )
+        proposals = list(
+            self.session.scalars(
+                select(Proposal)
+                .where(Proposal.phone == self.phone)
+                .order_by(Proposal.created.desc())
+                .limit(5)
+            )
+        )
+        summary = {
+            "reason": args.reason,
+            "buyer_name": self.session.get(Customer, self.phone).name,
+            "property_id": test.property_id if test else "",
+            "listing_id": test.listing_id if test else "",
+            "preferences_with_evidence": [json.loads(p) for p in preferences],
+            "proposals": [
+                {"kind": p.kind, "details": json.loads(p.payload), "status": p.status} for p in proposals
+            ],
+            "recent_messages": [{"role": m.role, "text": m.content[:1000]} for m in reversed(messages)],
+            "delivery": "Saved for dealer review in Estate AI; no external notification sent",
+        }
+        self.session.add(
+            Audit(phone=self.phone, action="dealer_alert", detail=json.dumps(summary, ensure_ascii=False))
+        )
         return {"status": "human_followup_required", "bot_paused": True}
 
 

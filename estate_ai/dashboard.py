@@ -10,10 +10,25 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import Field
 
-from estate_ai.db import Audit, Customer, Job, Message, Property, Proposal, TestSession
+from estate_ai.db import (
+    Audit,
+    Customer,
+    Job,
+    Message,
+    Outbox,
+    Property,
+    PropertyListing,
+    PropertyMetadata,
+    Proposal,
+    TestSession,
+    WorkspaceSettings,
+    now,
+)
 from estate_ai.document_query import func, select
-from estate_ai.schemas import SearchArgs, StrictModel
-from estate_ai.tools import ToolService, property_data
+from estate_ai.identity import company_name
+from estate_ai.property_templates import seed_template, templates
+from estate_ai.schemas import RelatedArgs, SearchArgs, StrictModel
+from estate_ai.tools import ToolService, property_data, related_note
 from estate_ai.workflows import enqueue
 
 WEB = Path(__file__).parent / "web"
@@ -21,6 +36,22 @@ WEB = Path(__file__).parent / "web"
 
 class SessionInput(StrictModel):
     name: str = Field(default="New test conversation", min_length=1, max_length=120)
+    buyer_name: str = Field(default="", max_length=120)
+    property_id: str = Field(default="", max_length=64)
+    listing_id: str = Field(default="", max_length=120, pattern=r"^[A-Za-z0-9_-]*$")
+
+
+class ListingInput(StrictModel):
+    property_id: str = Field(min_length=1, max_length=64)
+
+
+class CompanyInput(StrictModel):
+    business_name: str = Field(min_length=1, max_length=120, pattern=r"^[^\r\n\x00-\x1f]+$")
+
+
+class HumanReplyInput(StrictModel):
+    text: str = Field(min_length=1, max_length=4000)
+    event_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
 
 
 def decode(value: str):
@@ -51,7 +82,127 @@ def register_dashboard(app, settings, admin):
     def dashboard_page():
         return FileResponse(WEB / "index.html", headers={"Cache-Control": "no-store"})
 
+    @app.get("/manifest.webmanifest", include_in_schema=False)
+    def dashboard_manifest():
+        return FileResponse(WEB / "manifest.webmanifest", media_type="application/manifest+json")
+
     router = APIRouter(prefix="/api", dependencies=[Depends(admin)])
+
+    @router.put("/settings/company")
+    def update_company(body: CompanyInput, request: Request):
+        name = body.business_name.strip()
+        if not name:
+            raise HTTPException(422, "Enter a company name")
+        with request.app.state.factory() as session:
+            row = session.get(WorkspaceSettings, "identity")
+            if row:
+                row.business_name = name
+            else:
+                session.add(WorkspaceSettings(business_name=name))
+            session.add(Audit(phone="", action="company_identity_updated", detail=name))
+            session.commit()
+        return {"business_name": name}
+
+    @router.post("/conversations/{phone}/reply", status_code=202)
+    def human_reply(phone: str, body: HumanReplyInput, request: Request):
+        text = body.text.strip()
+        if not text:
+            raise HTTPException(422, "Enter a message")
+        event_id = "human:" + body.event_id
+        with request.app.state.factory() as session:
+            existing = session.get(Outbox, event_id)
+            if existing:
+                if existing.phone != phone or existing.body != text or existing.sender != "human":
+                    raise HTTPException(409, "This reply identifier is already in use")
+                return {"event_id": event_id, "state": existing.state, "channel": existing.channel}
+            customer = session.scalar(select(Customer).where(Customer.phone == phone).with_for_update())
+            if not customer:
+                raise HTTPException(404, "Conversation not found")
+            if customer.opted_out:
+                raise HTTPException(409, "This buyer opted out; replies are blocked")
+            if not customer.paused:
+                raise HTTPException(409, "Take over this conversation before replying")
+            if now() - customer.last_inbound >= 86400:
+                raise HTTPException(409, "The reply window has closed; wait for a new buyer message")
+            is_test = session.get(TestSession, phone) is not None
+            if not is_test and settings.whatsapp_mode != "live":
+                raise HTTPException(409, "Live WhatsApp is not enabled for this buyer")
+            channel = "simulate" if is_test else "whatsapp"
+            # A human reply never resumes automation or revives previously queued AI replies.
+            for item in session.scalars(
+                select(Outbox).where(
+                    Outbox.phone == phone, Outbox.state == "pending", Outbox.sender.not_in(["human"])
+                )
+            ):
+                item.state = "suppressed"
+            for job in session.scalars(select(Job).where(Job.phone == phone, Job.state == "pending")):
+                job.state = "suppressed"
+            session.add(
+                Message(id="reply:" + event_id, phone=phone, role="assistant", author="human", content=text)
+            )
+            session.add(Outbox(id=event_id, phone=phone, body=text, channel=channel, sender="human"))
+            session.add(
+                Audit(
+                    phone=phone,
+                    action="human_reply",
+                    detail=json.dumps(
+                        {
+                            "message_id": "reply:" + event_id,
+                            "channel": channel,
+                        }
+                    ),
+                )
+            )
+            session.commit()
+            return {"event_id": event_id, "state": "pending", "channel": channel}
+
+    def session_data(session, row):
+        property_row = session.get(Property, row.property_id) if row.property_id else None
+        return {
+            "phone": row.phone,
+            "name": row.name,
+            "created": row.created,
+            "buyer_name": row.buyer_name,
+            "property_id": row.property_id,
+            "listing_id": row.listing_id,
+            "property": property_data(property_row)
+            if property_row and (not property_row.demo or settings.allow_demo_data)
+            else None,
+        }
+
+    @router.put("/housing-listings/{listing_id}")
+    def map_listing(listing_id: str, body: ListingInput, request: Request):
+        """Explicit manual mapping only. Never guess a listing from a title."""
+        import re
+
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,120}", listing_id):
+            raise HTTPException(422, "Use the Housing.com listing ID, not a title or URL")
+        with request.app.state.factory() as session:
+            row = session.get(Property, body.property_id)
+            if not row:
+                raise HTTPException(404, "Property not found")
+            if row.demo and (not settings.allow_demo_data or settings.whatsapp_mode == "live"):
+                raise HTTPException(409, "Demo mapping requires simulation and demo permission")
+            if row.demo != listing_id.startswith("DEMO-"):
+                raise HTTPException(422, "Fictional references must start DEMO-; real references must not")
+            mapping = session.get(PropertyListing, listing_id)
+            if mapping and mapping.property_id != row.id:
+                raise HTTPException(
+                    409, "Listing already maps to another property; review the existing mapping"
+                )
+            if not mapping:
+                session.add(PropertyListing(id=listing_id, property_id=row.id, demo=row.demo))
+                session.commit()
+            return {"listing_id": listing_id, "property_id": row.id, "demo": row.demo}
+
+    @router.get("/housing-listings/{listing_id}")
+    def resolve_listing(listing_id: str, request: Request):
+        with request.app.state.factory() as session:
+            mapping = session.get(PropertyListing, listing_id)
+            row = session.get(Property, mapping.property_id) if mapping else None
+            if not row or (row.demo and not settings.allow_demo_data):
+                raise HTTPException(404, "Listing mapping not found")
+            return {"listing_id": listing_id, "property_id": row.id, "property": property_data(row)}
 
     def customers(session):
         rows = list(session.scalars(select(Customer).order_by(Customer.last_inbound.desc()).limit(200)))
@@ -60,6 +211,35 @@ def register_dashboard(app, settings, admin):
         for row in rows:
             recent = session.scalar(
                 select(Message).where(Message.phone == row.phone).order_by(Message.created.desc()).limit(1)
+            )
+            last_buyer = session.scalar(
+                select(Message)
+                .where(Message.phone == row.phone, Message.role == "user")
+                .order_by(Message.created.desc())
+                .limit(1)
+            )
+            last_human = session.scalar(
+                select(Message)
+                .where(Message.phone == row.phone, Message.author == "human")
+                .order_by(Message.created.desc())
+                .limit(1)
+            )
+            human_delivery = session.get(Outbox, last_human.id.removeprefix("reply:")) if last_human else None
+            followup_status = "awaiting_buyer"
+            if row.paused and not row.opted_out:
+                if not last_human or (last_buyer and last_buyer.created > last_human.created):
+                    followup_status = "reply_needed"
+                elif human_delivery and human_delivery.state == "delivery_unknown":
+                    followup_status = "delivery_review"
+                elif human_delivery and human_delivery.state == "suppressed":
+                    followup_status = "reply_needed"
+                elif human_delivery and human_delivery.state in {"pending", "sending"}:
+                    followup_status = "reply_queued"
+            test_context = session.get(TestSession, row.phone)
+            interested = (
+                session.get(Property, test_context.property_id)
+                if (test_context and test_context.property_id)
+                else None
             )
             preferences = {}
             evidence = []
@@ -88,6 +268,11 @@ def register_dashboard(app, settings, admin):
                     "test": row.phone in test_phones,
                     "last_inbound": row.last_inbound,
                     "last_message": recent.content if recent else "No messages yet",
+                    "last_message_at": recent.created if recent else row.last_inbound,
+                    "reply_needed": row.paused and not row.opted_out and followup_status == "reply_needed",
+                    "followup_status": followup_status,
+                    "property_id": interested.id if interested else "",
+                    "property_title": interested.title if interested else "",
                     "preferences": preferences,
                     "preference_sources": evidence,
                     "confirmed_budget": decode(budget.payload).get("amount_inr") if budget else None,
@@ -113,6 +298,8 @@ def register_dashboard(app, settings, admin):
                 item = proposal_data(row)
                 buyer = session.get(Customer, row.phone)
                 property_row = session.get(Property, item["details"].get("property_id", ""))
+                metadata = session.get(PropertyMetadata, property_row.id) if property_row else None
+                address = decode(metadata.payload).get("details", {}).get("address") if metadata else None
                 item.update(
                     {
                         "buyer_name": buyer.name or "Buyer " + row.phone[-4:] if buyer else row.phone,
@@ -122,11 +309,38 @@ def register_dashboard(app, settings, admin):
                         "location": ", ".join(filter(None, [property_row.locality, property_row.city]))
                         if property_row
                         else "",
+                        "address": address if isinstance(address, str) else "",
+                        "property_available": property_row.available if property_row else None,
+                        "property_demo": property_row.demo if property_row else False,
                         "test": session.get(TestSession, row.phone) is not None,
                     }
                 )
                 visits.append(item)
             return {
+                "business_name": company_name(session, settings),
+                "operations": {
+                    "available_properties": scalar(
+                        select(func.count()).select_from(Property).where(Property.available.is_(True))
+                    ),
+                    "demo_properties": scalar(
+                        select(func.count()).select_from(Property).where(Property.demo.is_(True))
+                    ),
+                    "issues": [
+                        {"phone": o.phone, "kind": "delivery_unknown", "created": o.created}
+                        for o in session.scalars(
+                            select(Outbox)
+                            .where(Outbox.state == "delivery_unknown")
+                            .order_by(Outbox.created.desc())
+                            .limit(20)
+                        )
+                    ]
+                    + [
+                        {"phone": j.phone, "kind": "agent_failed", "created": j.created}
+                        for j in session.scalars(
+                            select(Job).where(Job.state == "failed").order_by(Job.created.desc()).limit(20)
+                        )
+                    ],
+                },
                 "counts": {
                     "conversations": scalar(select(func.count()).select_from(Customer)),
                     "properties": scalar(select(func.count()).select_from(Property)),
@@ -202,25 +416,42 @@ def register_dashboard(app, settings, admin):
             batches = []
             for search in reversed(searches):
                 data = decode(search.detail)
+                anchor = session.get(Property, data.get("source_property_id", ""))
                 properties = []
                 for property_id in data.get("property_ids", []):
                     row = session.get(Property, property_id)
                     if row and (not row.demo or settings.allow_demo_data):
-                        properties.append(property_data(row))
+                        if data.get("kind") == "related" and not row.available:
+                            continue
+                        item = property_data(row)
+                        if anchor and data.get("kind") == "related":
+                            item["match_note"] = related_note(row, anchor)
+                        properties.append(item)
                 batches.append(
                     {
                         "source_message_id": data.get("source_message_id"),
                         "properties": properties,
                         "filters": data.get("filters", {}),
+                        "kind": data.get("kind", "search"),
+                        "source_property_id": data.get("source_property_id"),
+                        "basis": data.get("basis"),
                     }
                 )
             more_available = False
             if searches and not customer.paused and not customer.opted_out:
-                args = SearchArgs.model_validate(
-                    {**decode(searches[0].detail).get("filters", {}), "exclude_seen": True}
-                )
-                query = ToolService(session, phone, "preview", settings.allow_demo_data).search_query(args)
-                more_available = session.scalar(query.limit(1)) is not None
+                latest = decode(searches[0].detail)
+                service = ToolService(session, phone, "preview", settings.allow_demo_data)
+                if latest.get("kind") == "related":
+                    try:
+                        _, candidates, _ = service.related_candidates(
+                            RelatedArgs(property_id=latest.get("source_property_id"))
+                        )
+                        more_available = bool(candidates)
+                    except ValueError:
+                        more_available = False
+                else:
+                    args = SearchArgs.model_validate({**latest.get("filters", {}), "exclude_seen": True})
+                    more_available = session.scalar(service.search_query(args).limit(1)) is not None
             return {"batches": batches, "has_more": more_available, "has_search": bool(searches)}
 
     @router.post("/test-sessions/{phone}/more-properties", status_code=202)
@@ -231,6 +462,10 @@ def register_dashboard(app, settings, admin):
     def browse_properties(phone: str, request: Request):
         return queue_property_search(phone, request, "browse")
 
+    @router.post("/test-sessions/{phone}/related-properties", status_code=202)
+    def related_properties(phone: str, request: Request):
+        return queue_property_search(phone, request, "related")
+
     def queue_property_search(phone, request, action):
         if settings.whatsapp_mode == "live":
             raise HTTPException(409, "Test recommendations require simulation mode")
@@ -238,6 +473,8 @@ def register_dashboard(app, settings, admin):
             customer = session.get(Customer, phone)
             if not session.get(TestSession, phone) or not customer:
                 raise HTTPException(404, "Test conversation not found")
+            if action == "related" and not session.get(TestSession, phone).property_id:
+                raise HTTPException(409, "Select a property for this test conversation first")
             if customer.paused or customer.opted_out:
                 raise HTTPException(409, "This conversation is paused or opted out")
             if session.scalar(
@@ -251,6 +488,8 @@ def register_dashboard(app, settings, admin):
             phone,
             "Browse all available inventory across locations and budgets."
             if action == "browse"
+            else "Show related properties"
+            if action == "related"
             else "Show me more matching properties using the same search criteria.",
             "simulate",
         )
@@ -268,7 +507,7 @@ def register_dashboard(app, settings, admin):
     def test_sessions(request: Request):
         with request.app.state.factory() as session:
             return [
-                {"phone": s.phone, "name": s.name, "created": s.created}
+                session_data(session, s)
                 for s in session.scalars(select(TestSession).order_by(TestSession.created.desc()))
             ]
 
@@ -278,11 +517,63 @@ def register_dashboard(app, settings, admin):
             raise HTTPException(409, "Switch to simulation mode before creating test conversations")
         phone = "999" + str(uuid4().int).zfill(12)[-12:]
         with request.app.state.factory() as session:
-            row = TestSession(phone=phone, name=body.name)
+            property_id = body.property_id
+            if body.listing_id:
+                mapping = session.get(PropertyListing, body.listing_id)
+                if not mapping:
+                    raise HTTPException(404, "Housing listing has no property mapping")
+                if property_id and property_id != mapping.property_id:
+                    raise HTTPException(422, "Listing and property do not match")
+                property_id = mapping.property_id
+            listing_id = body.listing_id
+            if property_id:
+                property_row = session.get(Property, property_id)
+                if not property_row and settings.allow_demo_data:
+                    template = next((item for item in templates() if item["id"] == property_id), None)
+                    if template:
+                        seed_template(session, template)
+                        property_row = session.get(Property, property_id)
+                if not property_row:
+                    raise HTTPException(404, "Property not found")
+                if property_row.demo and not settings.allow_demo_data:
+                    raise HTTPException(409, "Enable demo permission for fictional property tests")
+                if not property_row.available:
+                    raise HTTPException(409, "Property is unavailable; select another listing")
+                if not listing_id:
+                    mapping = session.scalar(
+                        select(PropertyListing)
+                        .where(PropertyListing.property_id == property_id)
+                        .order_by(PropertyListing.id)
+                        .limit(1)
+                    )
+                    listing_id = mapping.id if mapping else ""
+            row = TestSession(
+                phone=phone,
+                name=body.name,
+                buyer_name=body.buyer_name.strip(),
+                property_id=property_id,
+                listing_id=listing_id,
+            )
             session.add(row)
-            session.add(Customer(phone=phone, name=body.name))
+            session.add(Customer(phone=phone, name=row.buyer_name or body.name))
+            if property_id:
+                session.add(
+                    Audit(
+                        phone=phone,
+                        action="lead_context",
+                        detail=json.dumps(
+                            {
+                                "buyer_name": row.buyer_name,
+                                "property_id": property_id,
+                                "listing_id": listing_id,
+                                "source": "manual simulation",
+                                "company": company_name(session, settings),
+                            }
+                        ),
+                    )
+                )
             session.commit()
-            return {"phone": phone, "name": row.name, "created": row.created}
+            return session_data(session, row)
 
     @router.post("/integrations/ollama/check")
     async def check_ollama():

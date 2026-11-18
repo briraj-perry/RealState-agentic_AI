@@ -4,14 +4,15 @@ import logging
 from pymongo.errors import DuplicateKeyError
 
 from estate_ai.agent import EstateAgent
-from estate_ai.db import Audit, Customer, Job, Message, Outbox, now
+from estate_ai.db import Audit, Customer, Job, Message, Outbox, TestSession, now
 from estate_ai.document_query import select
 from estate_ai.messaging import WhatsAppClient
+from estate_ai.schemas import HandoffArgs
 from estate_ai.tools import ToolService, confirm_proposal
 
 log = logging.getLogger(__name__)
 STOP_WORDS = {"stop", "unsubscribe", "opt out", "stop messaging me", "बंद करो", "ਬੰਦ ਕਰੋ"}
-HUMAN_WORDS = {"human", "agent", "dealer", "talk to a human", "talk to dealer"}
+HUMAN_WORDS = {"human", "agent", "dealer", "talk to a human", "talk to dealer", "biba", "talk to biba"}
 
 
 def enqueue(factory, event_id: str, phone: str, text: str, channel: str, timestamp: float | None = None):
@@ -31,8 +32,9 @@ def enqueue(factory, event_id: str, phone: str, text: str, channel: str, timesta
             customer.paused = True
             session.add(Audit(phone=phone, action="opt_out", detail=event_id))
         elif command in HUMAN_WORDS:
-            customer.paused = True
-            session.add(Audit(phone=phone, action="dealer_alert", detail="Buyer requested human takeover"))
+            ToolService(session, phone, event_id).request_human_handoff(
+                HandoffArgs(reason="Buyer requested human takeover")
+            )
         session.add(Message(id=event_id, phone=phone, role="user", content=text))
         session.add(
             Job(
@@ -94,6 +96,24 @@ class Worker:
                     reply = ToolService(
                         session, phone, job.id, self.settings.allow_demo_data
                     ).browse_properties()
+                elif job.id.startswith("related:") or (
+                    session.get(TestSession, phone)
+                    and job.text.strip().casefold().rstrip(".!?")
+                    in {
+                        "related properties",
+                        "show related properties",
+                        "show me related properties",
+                        "similar properties",
+                        "show similar properties",
+                        "show me similar properties",
+                        "other options",
+                        "show related homes",
+                        "show alternatives",
+                    }
+                ):
+                    reply = ToolService(
+                        session, phone, job.id, self.settings.allow_demo_data
+                    ).related_properties()
                 elif job.id.startswith("more:"):
                     reply = ToolService(
                         session, phone, job.id, self.settings.allow_demo_data
@@ -138,7 +158,12 @@ class Worker:
                 return
             customer = session.get(Customer, item.phone)
             # Even simulated messages respect opt-outs and the inbound service window.
-            if customer.opted_out or customer.paused or now() - customer.last_inbound >= 86400:
+            if (
+                customer.opted_out
+                or (customer.paused and item.sender != "human")
+                or now() - customer.last_inbound >= 86400
+                or (session.get(TestSession, item.phone) and item.channel != "simulate")
+            ):
                 item.state = "suppressed"
                 session.commit()
                 return

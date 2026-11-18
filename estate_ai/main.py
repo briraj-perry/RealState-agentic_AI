@@ -20,10 +20,12 @@ from estate_ai.db import (
     Outbox,
     Property,
     Proposal,
+    TestSession,
     connect,
     now,
 )
 from estate_ai.document_query import select
+from estate_ai.identity import company_name
 from estate_ai.inventory_import import register_inventory_import
 from estate_ai.photos import register_photos
 from estate_ai.property_templates import seed_demo_inventory, templates
@@ -83,7 +85,9 @@ def create_app(settings=None, factory=None, agent=None, whatsapp=None):
         return {"status": "ok"}
 
     @app.get("/api/status", dependencies=[Depends(admin)])
-    def status():
+    def status(request: Request):
+        with request.app.state.factory() as session:
+            business_name = company_name(session, settings)
         return {
             "model": settings.ollama_model,
             "ollama_configured": not settings.ollama_requires_api_key
@@ -94,7 +98,7 @@ def create_app(settings=None, factory=None, agent=None, whatsapp=None):
             "calendar": "not_connected",
             "worker_enabled": settings.worker_enabled,
             "demo_inventory_allowed": settings.allow_demo_data,
-            "business_name": settings.business_name,
+            "business_name": business_name,
             "timezone": "Asia/Kolkata",
             "whatsapp_credentials_configured": all(
                 [
@@ -140,12 +144,31 @@ def create_app(settings=None, factory=None, agent=None, whatsapp=None):
             return {
                 "paused": customer.paused,
                 "opted_out": customer.opted_out,
+                "last_inbound": customer.last_inbound,
+                "manual_reply_available": bool(
+                    customer.paused
+                    and not customer.opted_out
+                    and now() - customer.last_inbound < 86400
+                    and (session.get(TestSession, phone) or settings.whatsapp_mode == "live")
+                ),
                 "messages": [
-                    {"id": m.id, "role": m.role, "content": m.content, "created": m.created}
+                    {
+                        "id": m.id,
+                        "role": m.role,
+                        "author": m.author,
+                        "content": m.content,
+                        "created": m.created,
+                    }
                     for m in reversed(recent)
                 ],
                 "outbox": [
-                    {"id": o.id, "state": o.state, "error": o.error}
+                    {
+                        "id": o.id,
+                        "state": o.state,
+                        "error": o.error,
+                        "sender": o.sender,
+                        "message_id": "reply:" + o.id,
+                    }
                     for o in session.scalars(
                         select(Outbox).where(Outbox.phone == phone).order_by(Outbox.created.desc()).limit(100)
                     )
@@ -194,23 +217,51 @@ def create_app(settings=None, factory=None, agent=None, whatsapp=None):
             raise HTTPException(409, "Demo inventory requires ALLOW_DEMO_DATA=true and simulation mode")
         with request.app.state.factory() as session:
             row = session.get(Property, property_id)
+            values = body.model_dump(exclude={"details"})
             if row is None:
-                row = Property(**body.model_dump())
+                row = Property(**values)
                 session.add(row)
             else:
                 if row.demo != body.demo:
                     raise HTTPException(409, "A property's demo/real classification cannot be changed")
-                for key, value in body.model_dump().items():
+                for key, value in values.items():
                     setattr(row, key, value)
                 row.verified_at = now()
+            if body.details is not None:
+                from estate_ai.db import PropertyMetadata
+
+                metadata = session.get(PropertyMetadata, property_id)
+                payload = json.loads(metadata.payload) if metadata else {}
+                payload["details"] = body.details
+                if metadata:
+                    metadata.payload = json.dumps(payload)
+                else:
+                    session.add(PropertyMetadata(property_id=property_id, payload=json.dumps(payload)))
             session.commit()
             return property_data(row, include_internal=True)
 
     @app.get("/api/properties", dependencies=[Depends(admin)])
     def properties(request: Request):
+        from estate_ai.db import PropertyListing, PropertyMetadata, PropertyPhoto
+        from estate_ai.document_query import load_only
+
         with request.app.state.factory() as session:
+            related = {
+                "metadata": {m.property_id: m for m in session.scalars(select(PropertyMetadata))},
+                "photos": {},
+                "listings": {},
+            }
+            for photo in session.scalars(
+                select(PropertyPhoto).options(
+                    load_only(PropertyPhoto.id, PropertyPhoto.property_id, PropertyPhoto.created)
+                )
+            ):
+                related["photos"].setdefault(photo.property_id, []).append(photo)
+            for listing in session.scalars(select(PropertyListing)):
+                related["listings"].setdefault(listing.property_id, []).append(listing)
             return [
-                property_data(p, include_internal=True) for p in session.scalars(select(Property).limit(200))
+                property_data(p, include_internal=True, related=related)
+                for p in session.scalars(select(Property).limit(2000))
             ]
 
     @app.post("/api/demo/seed", dependencies=[Depends(admin)])

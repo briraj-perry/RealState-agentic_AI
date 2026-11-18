@@ -34,6 +34,8 @@ jobs:
       OLLAMA_BASE_URL: ${{ vars.OLLAMA_BASE_URL || 'https://ollama.com' }}
       OLLAMA_MODEL: ${{ vars.OLLAMA_MODEL || 'gemma4:31b' }}
       WHATSAPP_MODE: ${{ vars.WHATSAPP_MODE || 'simulate' }}
+      BUSINESS_NAME: ${{ vars.BUSINESS_NAME || 'Hukam Realators' }}
+      ALLOW_DEMO_DATA: ${{ vars.ALLOW_DEMO_DATA || 'false' }}
       WHATSAPP_PHONE_NUMBER_ID: ${{ vars.WHATSAPP_PHONE_NUMBER_ID }}
       WHATSAPP_GRAPH_VERSION: ${{ vars.WHATSAPP_GRAPH_VERSION }}
     steps:
@@ -71,11 +73,12 @@ jobs:
           missing = [key for key in required if not os.environ.get(key)]
           if missing:
               raise SystemExit('Missing GitHub production secrets: ' + ', '.join(missing))
-          keys = ['MONGODB_URI', 'MONGODB_DATABASE', 'ADMIN_API_KEY', 'OLLAMA_BASE_URL', 'OLLAMA_MODEL',
+          keys = ['BUSINESS_NAME', 'MONGODB_URI', 'MONGODB_DATABASE', 'ADMIN_API_KEY', 'OLLAMA_BASE_URL', 'OLLAMA_MODEL',
                   'OLLAMA_API_KEY', 'WHATSAPP_MODE', 'WHATSAPP_PHONE_NUMBER_ID', 'WHATSAPP_GRAPH_VERSION',
                   'WHATSAPP_ACCESS_TOKEN', 'WHATSAPP_APP_SECRET', 'WHATSAPP_VERIFY_TOKEN']
           config = {key: os.environ.get(key, '') for key in keys}
-          config.update(WORKER_ENABLED='true', ALLOW_DEMO_DATA='false')
+          demo = os.environ['WHATSAPP_MODE'] == 'simulate' and os.environ['ALLOW_DEMO_DATA'] == 'true'
+          config.update(WORKER_ENABLED='true', ALLOW_DEMO_DATA=str(demo).lower())
           path = Path(os.environ['RUNNER_TEMP']) / 'estate-runtime.json'
           path.write_text(json.dumps(config))
           path.chmod(0o600)

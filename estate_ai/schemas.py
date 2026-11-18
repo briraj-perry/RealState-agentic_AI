@@ -34,6 +34,16 @@ class PropertyInput(StrictModel):
     available: bool = True
     description: str = Field(default="", max_length=6000)
     demo: bool = False
+    details: dict[str, str] | None = None
+
+    @field_validator("details")
+    @classmethod
+    def bounded_details(cls, value):
+        if value is not None and (
+            len(value) > 60 or any(len(k) > 80 or len(v) > 1000 for k, v in value.items())
+        ):
+            raise ValueError("Use at most 60 detail fields with short names and values")
+        return value
 
 
 class SearchArgs(StrictModel):
@@ -47,6 +57,12 @@ class SearchArgs(StrictModel):
 
 class PropertyArgs(StrictModel):
     property_id: str = Field(min_length=1, max_length=64)
+
+
+class RelatedArgs(StrictModel):
+    property_id: str | None = Field(default=None, min_length=1, max_length=64)
+    limit: int = Field(default=3, ge=1, le=5)
+    exclude_seen: bool = True
 
 
 class PreferenceArgs(StrictModel):

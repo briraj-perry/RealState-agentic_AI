@@ -6,6 +6,7 @@ from PIL import Image
 
 from estate_ai.db import Customer, Message
 from estate_ai.main import create_app
+from estate_ai.property_templates import seed_template, templates
 from estate_ai.tools import ToolService
 
 HEADERS = {"X-API-Key": "test-admin-secret"}
@@ -115,7 +116,10 @@ def test_browse_and_more_cards_are_bound_to_real_tool_results_and_photos(factory
             raise AssertionError("Inventory buttons must call the tools reliably without depending on prose")
 
     with TestClient(create_app(settings, factory, agent=NoModel())) as client:
-        client.post("/api/demo/seed", headers=HEADERS)
+        with factory() as fixture:
+            for item in templates()[:8]:
+                seed_template(fixture, item)
+            fixture.commit()
         photo = client.post(
             "/api/properties/DEMO-ZIRAKPUR-001/photos", headers=HEADERS, content=image_bytes()
         ).json()
@@ -146,7 +150,10 @@ def test_browse_and_more_cards_are_bound_to_real_tool_results_and_photos(factory
 
 def test_more_button_preserves_budget_and_does_not_contact_real_buyers(factory, settings):
     with TestClient(create_app(settings, factory)) as client:
-        client.post("/api/demo/seed", headers=HEADERS)
+        with factory() as fixture:
+            for item in templates()[:8]:
+                seed_template(fixture, item)
+            fixture.commit()
         phone = client.post("/api/test-sessions", headers=HEADERS, json={}).json()["phone"]
         with factory() as session:
             session.add(Message(id="filters", phone=phone, role="user", content="3 BHK Mohali under 90 lakh"))

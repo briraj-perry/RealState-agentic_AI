@@ -1,0 +1,14 @@
+{
+  "id": "/",
+  "name": "Estate AI Dealer Workspace",
+  "short_name": "Estate AI",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f5f7f4",
+  "theme_color": "#17342f",
+  "icons": [
+    {"src": "/assets/estate-icon-192.png", "sizes": "192x192", "type": "image/png"},
+    {"src": "/assets/estate-icon-512.png", "sizes": "512x512", "type": "image/png"}
+  ]
+}

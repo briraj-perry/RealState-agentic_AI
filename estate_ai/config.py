@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     admin_api_key: SecretStr = SecretStr("")
     mongodb_uri: SecretStr = SecretStr("mongodb://127.0.0.1:27017/?replicaSet=rs0")
     mongodb_database: str = Field(default="estate_ai", pattern=r"^[a-zA-Z0-9_-]{1,63}$")
-    business_name: str = "Estate AI Realty"
+    business_name: str = Field(default="Hukam Realators", min_length=1, max_length=120)
     allow_demo_data: bool = False
     ollama_base_url: str = "http://localhost:11434"
     ollama_api_key: SecretStr = SecretStr("")
