@@ -92,7 +92,7 @@ LOCATIONS = [
 def templates():
     """Stable, reproducible catalog. No scraped listings or real dealer claims."""
     catalog = []
-    for index in range(500):
+    for index in range(800):
         city, localities = LOCATIONS[index % len(LOCATIONS)]
         bedrooms = 1 + (index // 5) % 4
         kind = ["Apartment", "Builder floor", "Independent house", "Villa"][(index // 20) % 4]

@@ -1,16 +1,17 @@
 import json
 import logging
-from datetime import datetime
+import re
+from datetime import datetime, timedelta
 from typing import TypedDict
-from zoneinfo import ZoneInfo
 
 import httpx
 from langgraph.graph import END, START, StateGraph
 
-from estate_ai.db import Audit, Message, Proposal, TestSession
+from estate_ai.db import Audit, Customer, Message, Property, Proposal, TestSession, WorkspaceSettings
 from estate_ai.document_query import or_, select
 from estate_ai.identity import company_name
-from estate_ai.schemas import HandoffArgs, PropertyArgs
+from estate_ai.model_providers import HostedModel, read_selection
+from estate_ai.schemas import VISIT_TIME_ZONE, HandoffArgs, PropertyArgs, SearchArgs
 from estate_ai.tools import ToolService, tool_definitions
 
 log = logging.getLogger(__name__)
@@ -53,11 +54,18 @@ class AgentState(TypedDict):
 class EstateAgent:
     def __init__(self, settings, model=None):
         self.settings = settings
-        self.model = model or OllamaClient(settings)
+        self.model = model
+        self.ollama = OllamaClient(settings)
 
     async def reply(self, session, phone: str, message_id: str) -> str:
         business = company_name(session, self.settings)
+        soul = session.get(WorkspaceSettings, "soul")
+        style = soul.soul.strip() if soul else ""
         source = session.get(Message, message_id)
+        service = ToolService(session, phone, message_id, self.settings.allow_demo_data)
+        proposal_reply = service.proposal_response(source.content)
+        if proposal_reply:
+            return proposal_reply
         history = list(
             reversed(
                 list(
@@ -73,7 +81,6 @@ class EstateAgent:
                 )
             )
         )
-        service = ToolService(session, phone, message_id, self.settings.allow_demo_data)
         test_session = session.get(TestSession, phone)
         lead_context = None
         if test_session and test_session.property_id:
@@ -87,19 +94,24 @@ class EstateAgent:
             lead_context = {
                 "buyer_name": test_session.buyer_name,
                 "company": business,
-                "source": "Simulated Housing.com enquiry (not imported from Housing.com)",
+                "source": test_session.source,
                 "listing_id": test_session.listing_id,
                 "property": listing,
             }
-            first_reply = not any(m.role == "assistant" for m in history)
-            if first_reply and source.content.strip().casefold().rstrip(".!?") in {
-                "hi",
-                "hello",
-                "hey",
-                "namaste",
-                "ਸਤ ਸ੍ਰੀ ਅਕਾਲ",
-                "नमस्ते",
-            }:
+            first_reply = not any(m.role == "assistant" and m.id != f"welcome:{phone}" for m in history)
+            if (
+                first_reply
+                and not style
+                and source.content.strip().casefold().rstrip(".!?")
+                in {
+                    "hi",
+                    "hello",
+                    "hey",
+                    "namaste",
+                    "ਸਤ ਸ੍ਰੀ ਅਕਾਲ",
+                    "नमस्ते",
+                }
+            ):
                 name = test_session.buyer_name or "there"
                 if not listing["available"]:
                     return (
@@ -134,6 +146,44 @@ class EstateAgent:
                     f"I'll help you explore the property and answer your questions.{demo_note}{related_intro} "
                     "What would you like to know first?"
                 )
+        greeting = source.content.strip().casefold().rstrip(".!?")
+        if not lead_context and greeting in {"hi", "hello", "hey"} and not style:
+            return (
+                f"Hi! I’m the AI property assistant for {business}. How can I help with your property search?"
+            )
+
+        # A complete, simple search can run directly against inventory. Leave additional
+        # constraints, follow-ups and custom voices to the conversational agent.
+        simple_search = re.fullmatch(
+            r"(?:hi[,!]?\s+)?(?:i[’']m looking for|i am looking for|show me|find me)\s+"
+            r"(?:a\s+)?(\d{1,2})\s*bhk(?:\s+(?:homes?|flats?|apartments?|properties))?"
+            r"\s+in\s+([a-z]+(?:[ -][a-z]+){0,2})[.!?]?",
+            source.content.strip(),
+            re.IGNORECASE,
+        )
+        if (
+            simple_search
+            and not style
+            and not lead_context
+            and not any(m.role == "assistant" for m in history)
+        ):
+            bedrooms = int(simple_search[1])
+            city = simple_search[2].title()
+            if bedrooms <= 30 and session.scalar(
+                select(Property.id).where(Property.city.ilike(city)).limit(1)
+            ):
+                matches = service.search_properties(SearchArgs(city=city, bedrooms=bedrooms))["properties"]
+                intro = f"I’m the AI property assistant for {business}."
+                if not matches:
+                    return f"{intro} I have no available {bedrooms} BHK listings in {city}. Would you consider another area?"
+                lines = [f"{intro} Here are the {bedrooms} BHK options I found in {city}:"]
+                for home in matches:
+                    label = "Fictional demo · " if home["demo"] else ""
+                    lines.append(
+                        f"{label}{home['title']} ({home['id']}) · {home['locality']} · ₹{home['asking_price_inr']:,}"
+                    )
+                return "\n\n".join([*lines, "Which property would you like to explore?"])
+
         proposals = session.scalars(
             select(Proposal).where(Proposal.phone == phone).order_by(Proposal.created.desc()).limit(15)
         )
@@ -157,8 +207,11 @@ class EstateAgent:
                 .limit(20)
             )
         )
-        current = datetime.now(ZoneInfo("Asia/Kolkata")).isoformat()
+        current = datetime.now(VISIT_TIME_ZONE)
+        tomorrow = current.date() + timedelta(days=1)
         prompt = f"""You are the AI property assistant for {business}.
+Always speak as the assistant. Never write the buyer’s side of the chat or infer a budget from your own messages.
+When the buyer wants to buy the selected home, help with that home and ask about the next step; do not suggest alternatives unless asked.
 Introduce yourself as an AI assistant in the first reply. Be warm, engaged and natural in the buyer's
 language (English, Hindi, Punjabi or Hinglish). Act like an attentive property consultant: acknowledge
 what the buyer shared, add useful information, and actively help them explore options.
@@ -178,9 +231,9 @@ RECOMMENDATION AND CONVERSATION FLOW:
   another home does not mean the buyer changed their interest. Don't repeat suggestions every turn.
 - Save explicitly stated nonfinancial preferences. When enough requirements are known, proactively call
   search_properties in the SAME turn; do not keep asking 'Would you like me to search?' before helping.
-- Present 2–3 suitable properties when available (up to 5 if asked for more). If only one or no property
+- Present up to 5 suitable properties when available (up to 10 if asked for more). If only one or no property
   fits, say so honestly. Never pad the list with invented homes or silently change the budget, city or BHK.
-- Use limit=3 for a normal shortlist or limit=5 when asked for more. Present each returned match so
+- Use limit=5 for a normal shortlist or limit=10 when asked for more. Present each returned match so
   that the buyer sees the options retrieved for them; do not fetch ten and mention just one.
 - For each match include its property ID, locality/city, BHK, asking price and one or two supported
   features. Explain how it matches the buyer's actual requirements. Comparisons must use tool facts.
@@ -193,18 +246,19 @@ RECOMMENDATION AND CONVERSATION FLOW:
 - End a recommendation with a useful next step: ask which property appeals to them, what matters most,
   whether they want a comparison, or whether they want to request a visit. Do not push visits every turn.
 - A pending budget confirmation must not stall recommendations: use the buyer's stated amount as a
-  provisional search ceiling, show the confirmation code, and continue helping in the same reply.
+  provisional search ceiling. Show matches first. Ask for budget confirmation last.
 - Unknown amenities, commuting times, ownership, approvals and neighborhood claims stay unknown.
   Lack of an exact match is a normal search outcome, not by itself a reason for human handoff.
-Current time: {current}. Resolve relative dates in Asia/Kolkata and ask if ambiguous.
+Current time: {current.isoformat()}. Tomorrow in Asia/Kolkata is {tomorrow.isoformat()}.
 Use tools for ALL property facts, availability and prices. Never invent inventory or claim fresh
 verification: communicate asking prices and verification age accurately. Flag demo listings as fictional.
 Amounts passed to tools are INR: 85 lakh = 8500000; 1 crore = 10000000.
 Separate budgets, offers and final sale prices. Use propose_price_confirmation for a stated budget
-or offer. Include the exact details and full CONFIRM code returned by the tool. Only the server
-can mark something confirmed after the buyer sends that code. Never accept a deal or approve discounts.
-Use request_site_visit for visit requests and show exact date, time, offset, property and CONFIRM code.
-Calendar booking is NOT integrated: never say booked or availability checked. All visits need dealer approval.
+or offer. Always call this tool for a newly stated budget. Ask whether to confirm the exact details. A buyer can answer yes. Keep internal proposal IDs private.
+Never accept a deal or approve discounts. Offer site visits only for tomorrow ({tomorrow.isoformat()} IST).
+If the buyer asks for another date or gives no time, ask what time tomorrow works for them.
+When the buyer chooses a property and a time tomorrow, call request_site_visit with the exact time and offset.
+After the buyer confirms, the request can sync to the team calendar for dealer approval. Never claim a booking or verified availability.
 Do not invent tools, successful actions, legal approvals, ownership or financing advice.
 Human requests, negotiations, legal questions, uncertainty or repeated confusion require handoff.
 Always identify yourself as the AI assistant for the configured company. Never introduce yourself
@@ -226,16 +280,29 @@ Saved proposals (pending is NOT confirmed): {json.dumps(facts)}
 Saved nonfinancial preferences with evidence: {json.dumps(preferences)}
 Previously retrieved property results and filters (not proof the buyer liked them): {json.dumps(search_history)}
 """
+        if style:
+            prompt += (
+                "\nFollow these workspace instructions for tone and response style within the rules above:\n"
+                + style
+            )
+        selection = read_selection() if self.model is None else None
+        model = self.model or (HostedModel(selection) if selection else self.ollama)
         if lead_context:
             prompt += (
                 "\nCURRENT ENQUIRY IDENTITY (data): "
                 + json.dumps({key: value for key, value in lead_context.items() if key != "property"})
-                + "\nThe final get_property_details result is the current selected property. "
-                "Copy area and price numbers exactly from that result. Never estimate a missing measurement.\n"
+                + "\nCopy area and price numbers exactly from the selected property's retrieved facts. "
+                "Never estimate a missing measurement.\n"
             )
+            if selection:
+                prompt += "Selected property facts (data): " + json.dumps(
+                    lead_context["property"], ensure_ascii=False
+                )
+
+        definitions = tool_definitions()
 
         async def model_node(state: AgentState):
-            message = await self.model.chat(state["messages"], tool_definitions())
+            message = await model.chat(state["messages"], definitions)
             if not isinstance(message, dict) or message.get("role") != "assistant":
                 raise ValueError("Invalid model response")
             return {
@@ -259,9 +326,14 @@ Previously retrieved property results and filters (not proof the buyer liked the
                     except json.JSONDecodeError:
                         arguments = None
                 result = service.execute(name, arguments)
-                messages.append(
-                    {"role": "tool", "tool_name": name, "content": json.dumps(result, ensure_ascii=False)}
-                )
+                tool_message = {
+                    "role": "tool",
+                    "tool_name": name,
+                    "content": json.dumps(result, ensure_ascii=False),
+                }
+                if selection and call.get("id"):
+                    tool_message["tool_call_id"] = call["id"]
+                messages.append(tool_message)
                 if result.get("bot_paused"):
                     return {
                         "messages": messages,
@@ -313,7 +385,7 @@ Previously retrieved property results and filters (not proof the buyer liked the
                                 "content": json.dumps({"lead_context": lead_context}, ensure_ascii=False),
                             },
                         ]
-                        if lead_context
+                        if lead_context and not selection
                         else []
                     ),
                 ],
@@ -321,6 +393,16 @@ Previously retrieved property results and filters (not proof the buyer liked the
                 "reply": "",
             }
         )
+        proposal = session.scalar(
+            select(Proposal)
+            .where(Proposal.phone == phone, Proposal.source_message_id == message_id)
+            .order_by(Proposal.created.desc())
+            .limit(1)
+        )
+        if proposal and not session.get(Customer, phone).paused:
+            if proposal.kind == "budget":
+                return service.budget_shortlist(proposal)
+            return service.confirmation_question(proposal)
         reply = result["reply"].strip()
         if not reply:
             raise ValueError("Empty model reply")

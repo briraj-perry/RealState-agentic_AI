@@ -1,8 +1,23 @@
 import re
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+VISIT_TIME_ZONE = ZoneInfo("Asia/Kolkata")
+
+
+def visit_tomorrow() -> date:
+    return datetime.now(VISIT_TIME_ZONE).date() + timedelta(days=1)
+
+
+def validate_visit_date(start_time: datetime) -> None:
+    tomorrow = visit_tomorrow()
+    if start_time.astimezone(VISIT_TIME_ZONE).date() != tomorrow:
+        raise ValueError(
+            f"Site visits can only be requested for tomorrow, {tomorrow:%d %b %Y} IST. Please choose a time that day."
+        )
 
 
 class StrictModel(BaseModel):
@@ -51,7 +66,7 @@ class SearchArgs(StrictModel):
     locality: str | None = Field(default=None, min_length=1, max_length=120)
     max_price: int | None = Field(default=None, gt=0)
     bedrooms: int | None = Field(default=None, ge=0, le=30)
-    limit: int = Field(default=3, ge=1, le=10)
+    limit: int = Field(default=5, ge=1, le=10)
     exclude_seen: bool = False
 
 
@@ -80,7 +95,7 @@ class PriceArgs(StrictModel):
 
 class VisitArgs(StrictModel):
     property_id: str = Field(min_length=1, max_length=64)
-    start_time: datetime
+    start_time: datetime = Field(description="Requested time tomorrow in Asia/Kolkata, with a UTC offset.")
 
     @field_validator("start_time")
     @classmethod

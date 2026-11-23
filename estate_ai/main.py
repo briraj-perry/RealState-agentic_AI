@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import ValidationError
 from pymongo.errors import DocumentTooLarge, DuplicateKeyError
 
+from estate_ai import apple_calendar
 from estate_ai.config import get_settings
 from estate_ai.dashboard import register_dashboard
 from estate_ai.db import (
@@ -27,6 +28,7 @@ from estate_ai.db import (
 from estate_ai.document_query import select
 from estate_ai.identity import company_name
 from estate_ai.inventory_import import register_inventory_import
+from estate_ai.model_providers import model_status
 from estate_ai.photos import register_photos
 from estate_ai.property_templates import seed_demo_inventory, templates
 from estate_ai.schemas import ChatInput, PropertyInput, normalize_phone
@@ -89,13 +91,13 @@ def create_app(settings=None, factory=None, agent=None, whatsapp=None):
         with request.app.state.factory() as session:
             business_name = company_name(session, settings)
         return {
-            "model": settings.ollama_model,
+            **model_status(settings),
             "ollama_configured": not settings.ollama_requires_api_key
             or bool(settings.ollama_api_key.get_secret_value()),
             "ollama_base_url": settings.ollama_base_url,
             "ollama_api_key_required": settings.ollama_requires_api_key,
             "whatsapp_mode": settings.whatsapp_mode,
-            "calendar": "not_connected",
+            "calendar": "apple_calendar" if apple_calendar.available() else "not_connected",
             "worker_enabled": settings.worker_enabled,
             "demo_inventory_allowed": settings.allow_demo_data,
             "business_name": business_name,

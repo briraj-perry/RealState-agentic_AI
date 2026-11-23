@@ -1,5 +1,6 @@
 import json
-from datetime import UTC, datetime, timedelta
+import re
+from datetime import datetime
 
 from pydantic import BaseModel, ValidationError
 
@@ -25,6 +26,7 @@ from estate_ai.schemas import (
     RelatedArgs,
     SearchArgs,
     VisitArgs,
+    validate_visit_date,
 )
 
 
@@ -121,7 +123,10 @@ TOOL_SPECS: dict[str, tuple[type[BaseModel], str]] = {
     ),
     "request_site_visit": (
         VisitArgs,
-        "Prepare a site-visit REQUEST for buyer confirmation. Does NOT book a calendar slot.",
+        (
+            "Prepare a site-visit request for tomorrow in Asia/Kolkata. Use the buyer's chosen time. "
+            "The buyer must confirm the request before it is sent for dealer approval."
+        ),
     ),
     "request_human_handoff": (HandoffArgs, "Pause the bot and alert the dealer when a human is needed."),
 }
@@ -196,7 +201,7 @@ class ToolService:
                 seen_ids.update(json.loads(detail).get("property_ids", []))
             if seen_ids:
                 query = query.where(Property.id.not_in(seen_ids))
-        return query.order_by(Property.asking_price, Property.id)
+        return query.order_by(Property.demo, Property.asking_price, Property.id)
 
     def search_properties(self, args: SearchArgs):
         properties = [
@@ -355,7 +360,7 @@ class ToolService:
             return "Tell me your preferred location, budget or bedrooms first, so I can find suitable properties."
         args = SearchArgs.model_validate(json.loads(detail).get("filters", {}))
         args.exclude_seen = True
-        args.limit = 5
+        args.limit = 10
         result = self.execute("search_properties", args.model_dump())
         if "error" in result:
             return "I couldn't retrieve more properties: " + result["error"]
@@ -378,7 +383,7 @@ class ToolService:
         return "\n\n".join(lines)
 
     def browse_properties(self):
-        result = self.execute("search_properties", {"limit": 3})
+        result = self.execute("search_properties", {})
         if "error" in result:
             return "I couldn't browse the inventory: " + result["error"]
         if not result["properties"]:
@@ -420,11 +425,141 @@ class ToolService:
             "proposal_id": row.id,
             "details": data,
             "status": row.status,
-            "confirmation_instruction": f"Buyer must reply CONFIRM {row.id} to confirm these exact details.",
+            "confirmation_instruction": "State the exact details and ask the buyer whether to confirm.",
             "notice": "Offers need dealer approval. Visits are requests, not booked appointments.",
         }
 
+    def budget_shortlist(self, proposal):
+        data = json.loads(proposal.payload)
+        budget = data["amount_inr"]
+        context = self.session.get(TestSession, self.phone)
+        selected = context.property_id if context else ""
+        mentioned = data.get("property_id")
+        if (
+            mentioned
+            and mentioned.casefold() in self.session.get(Message, self.message_id).content.casefold()
+        ):
+            selected = mentioned
+        anchor = self.property(selected) if selected else None
+        filters = {}
+        latest = self.session.scalar(
+            select(Audit.detail)
+            .where(Audit.phone == self.phone, Audit.action == "property_search_results")
+            .order_by(Audit.created.desc())
+            .limit(1)
+        )
+        if latest:
+            filters = json.loads(latest).get("filters", {})
+        criteria = {key: filters.get(key) for key in ("city", "locality", "bedrooms")}
+        if anchor:
+            criteria["city"] = criteria["city"] or anchor.city
+        matches = self.search_properties(SearchArgs(max_price=budget, **criteria))["properties"]
+        lines = [
+            f"{p['title']} ({p['id']}) in {p['locality']}, {p['city']} — ₹{p['asking_price_inr']:,}."
+            for p in matches
+        ]
+        if not lines:
+            lines.append("I found no available properties within that budget and your current criteria.")
+        if not anchor and len(matches) == 1:
+            anchor = self.property(matches[0]["id"])
+        if anchor and anchor.available:
+            data["property_id"] = anchor.id
+            question = f" and your interest in {anchor.title} ({anchor.id})"
+        else:
+            data["property_id"] = None
+            question = ""
+        proposal.payload = json.dumps(data, sort_keys=True)
+        lines.append(f"Should I confirm your budget of ₹{budget:,}{question}?")
+        return "\n\n".join(lines)
+
+    def confirmation_question(self, row):
+        data = json.loads(row.payload)
+        if row.kind == "visit":
+            when = datetime.fromisoformat(data["start_time"]).strftime("%d %b %Y at %H:%M (UTC%z)")
+            return f"Should I confirm your site-visit request for {data['property_id']} on {when}?"
+        return f"Should I confirm your offer of ₹{data['amount_inr']:,} for {data['property_id']}?"
+
+    def proposal_response(self, text):
+        clean = text.strip().casefold().rstrip(".!?")
+        if clean in {
+            "yes",
+            "yes please",
+            "yes, please",
+            "yes confirm",
+            "yes, confirm",
+            "yes please confirm",
+            "confirm it",
+            "confirm",
+            "sure",
+            "ok",
+            "okay",
+            "haan",
+            "हाँ",
+        }:
+            source = self.session.get(Message, self.message_id)
+            previous = self.session.scalar(
+                select(Message)
+                .where(
+                    Message.phone == self.phone,
+                    Message.created <= source.created,
+                    Message.id.not_in([source.id]),
+                )
+                .order_by(Message.created.desc())
+                .limit(1)
+            )
+            if previous and previous.role == "assistant" and previous.id.startswith("reply:"):
+                rows = self.session.scalars(
+                    select(Proposal).where(
+                        Proposal.phone == self.phone,
+                        Proposal.source_message_id == previous.id[6:],
+                    )
+                )
+                for row in rows:
+                    if row.kind == "budget":
+                        amount = json.loads(row.payload)["amount_inr"]
+                        question = previous.content.split("\n")[-1]
+                        prefix = f"Should I confirm your budget of ₹{amount:,}"
+                        asked = question == prefix + "?" or question.startswith(
+                            prefix + " and your interest in "
+                        )
+                    else:
+                        asked = previous.content == self.confirmation_question(row)
+                    if asked:
+                        return confirm_proposal(
+                            self.session, self.phone, "CONFIRM " + row.id, self.message_id
+                        )
+        match = re.fullmatch(
+            r"(?:my |our )?budget(?: is| of)?[ :₹]*(?:rs\.? *|inr *)?([0-9][0-9,]*(?:\.[0-9]+)?) *(lakhs?|lacs?|crores?|cr|l|k)?(?: rupees)?",
+            clean,
+        )
+        if match:
+            unit = match[2] or ""
+            multiplier = (
+                100000
+                if unit.startswith("l")
+                else 10000000
+                if unit.startswith("c")
+                else 1000
+                if unit == "k"
+                else 1
+            )
+            value = float(match[1].replace(",", "")) * multiplier
+            if 1 <= value <= 2_000_000_000:
+                result = self.propose_price_confirmation(PriceArgs(kind="budget", amount_inr=round(value)))
+                return self.budget_shortlist(self.session.get(Proposal, result["proposal_id"]))
+        return None
+
     def propose_price_confirmation(self, args: PriceArgs):
+        source = self.session.get(Message, self.message_id)
+        if source and source.content.strip().casefold().rstrip(".!?") in {
+            "hi",
+            "hello",
+            "hey",
+            "namaste",
+            "yes",
+            "no",
+        }:
+            raise ValueError("The buyer did not state an amount in this message")
         if args.kind == "offer" and not args.property_id:
             raise ValueError("An offer requires a property reference")
         if args.property_id:
@@ -435,9 +570,7 @@ class ToolService:
         row = self.property(args.property_id)
         if not row.available:
             raise ValueError("Property is unavailable")
-        current = datetime.now(UTC)
-        if not current < args.start_time <= current + timedelta(days=90):
-            raise ValueError("Visit must be in the future and within 90 days")
+        validate_visit_date(args.start_time)
         return self.proposal("visit", args.model_dump(mode="json"))
 
     def request_human_handoff(self, args: HandoffArgs):
@@ -488,26 +621,36 @@ class ToolService:
 def confirm_proposal(session, phone: str, text: str, source_id: str) -> str:
     token = text.strip().split(maxsplit=1)
     if len(token) != 2 or token[0].casefold() != "confirm":
-        return "Please reply with the full confirmation code shown with the details."
+        return "Please tell me which details you would like to confirm."
     row = session.get(Proposal, token[1].strip())
     if not row or row.phone != phone:
-        return "I couldn't find that confirmation request. Please check the code."
+        return "I couldn't find that confirmation request. Please share the details again."
     if row.created < now() - 86400:
         return "That confirmation request expired. Please send the details again."
     if row.status != "pending_confirmation":
         return "Those details have already been confirmed."
     if row.kind == "visit":
-        data = json.loads(row.payload)
-        property_row = session.get(Property, data["property_id"])
+        try:
+            visit = VisitArgs.model_validate_json(row.payload)
+            validate_visit_date(visit.start_time)
+        except ValidationError:
+            return "Please send a new visit time for tomorrow in India time."
+        except ValueError as exc:
+            return str(exc)
+        property_row = session.get(Property, visit.property_id)
         if not property_row or not property_row.available:
             return "That property is no longer available. I'll need to find an alternative."
-        if datetime.fromisoformat(data["start_time"]).timestamp() <= now():
-            return "That visit time has passed. Please choose a new time."
     row.status = "requested" if row.kind == "visit" else "buyer_confirmed"
+    if row.kind == "visit" and row.calendar_state != "saved":
+        row.calendar_state = "pending"
+        row.calendar_retry_at = now()
     row.confirmation_message_id = source_id
     session.add(Audit(phone=phone, action="dealer_alert", detail=f"Confirmed {row.kind}: {row.id}"))
     if row.kind == "visit":
         return "Your site-visit request is recorded. The dealer still needs to confirm availability; it isn't booked yet."
     if row.kind == "offer":
         return "Your offer is recorded and awaits the dealer's approval. This is not an agreed sale price."
-    return "Thanks, your budget is confirmed and saved."
+    property_id = json.loads(row.payload).get("property_id")
+    if property_id:
+        return f"Thanks, your budget and interest in {property_id} are confirmed. Would you like more details about this property?"
+    return "Thanks, your budget is confirmed and saved. Which property interests you?"

@@ -16,9 +16,9 @@ HEADERS = {"X-API-Key": "test-admin-secret"}
 def test_catalog_has_stable_unique_references_and_separate_area_and_rug():
     catalog = templates()
     assert catalog == templates()
-    assert len(catalog) == 500
-    assert len({p["id"] for p in catalog}) == 500
-    assert len({p["details"]["housing_listing_id"] for p in catalog}) == 500
+    assert len(catalog) == 800
+    assert len({p["id"] for p in catalog}) == 800
+    assert len({p["details"]["housing_listing_id"] for p in catalog}) == 800
     for p in catalog:
         assert p["demo"] and "Fictional" in p["description"]
         assert p["details"]["housing_listing_id"].startswith("DEMO-")
@@ -152,3 +152,44 @@ async def test_hi_has_context_followup_gets_current_facts_and_handoff_summary(fa
         assert any("91 lakh" in m["text"] for m in summary["recent_messages"])
     with factory() as session:
         assert not list(session.scalars(select(Outbox).where(Outbox.channel == "whatsapp")))
+
+
+@pytest.mark.asyncio
+async def test_portal_interest_then_budget_then_yes(factory, settings):
+    from estate_ai.db import Proposal
+
+    item = templates()[0]
+    with TestClient(create_app(settings, factory)) as client:
+        res = client.post(
+            "/api/test-sessions",
+            headers=HEADERS,
+            json={
+                "name": "Buyer test",
+                "buyer_name": "Sam",
+                "property_id": item["id"],
+                "portal_interest": True,
+            },
+        )
+        assert res.status_code == 201
+        phone = res.json()["phone"]
+        cards = client.get(f"/api/conversations/{phone}/recommendations", headers=HEADERS).json()
+        assert not cards["has_search"]
+        (welcome,) = cards["batches"]
+        assert welcome["message_id"] == f"welcome:{phone}" and welcome["kind"] == "selected"
+        assert [p["id"] for p in welcome["properties"]] == [item["id"]]
+    with factory() as session:
+        assert "Hi Sam" in session.get(Message, "welcome:" + phone).content
+    worker = Worker(factory, settings)
+    for event, text in [("budget-test", "my budget is 90 lakh"), ("yes-test", "yes")]:
+        assert enqueue(factory, event, phone, text, "simulate")
+        await worker.tick()
+    with factory() as session:
+        reply = session.get(Message, "reply:budget-test").content
+        assert reply.index(item["title"]) < reply.index("Should I confirm")
+        budget = session.scalar(select(Proposal).where(Proposal.phone == phone))
+        assert budget.status == "buyer_confirmed" and budget.confirmation_message_id == "yes-test"
+        assert json.loads(budget.payload) == {
+            "amount_inr": 9000000,
+            "kind": "budget",
+            "property_id": item["id"],
+        }

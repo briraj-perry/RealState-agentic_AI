@@ -15,7 +15,13 @@ const icons = {
   plus:'<path d="M12 5v14M5 12h14"/>',
 };
 const icon = name => `<svg viewBox="0 0 24 24" aria-hidden="true">${icons[name] || icons.test}</svg>`;
-const pages = {overview:'Overview', properties:'Properties', conversations:'Conversations', test:'Test Your Agent', settings:'Settings'};
+const modelProviders = {ollama:'Ollama', gemini:'Google Gemini', anthropic:'Anthropic Claude', openai:'OpenAI'};
+const modelPresets = {
+  gemini: ['gemini-3.8-flash', 'gemini-4-hydrogen', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.5-pro'],
+  anthropic: ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5'],
+  openai: ['gpt-5.4-mini', 'gpt-5.6-terra', 'gpt-6-astra'],
+};
+const pages = {overview:'Overview', properties:'Properties', portal:'Test listing portal', conversations:'Conversations', test:'Test Your Agent', settings:'Settings'};
 const state = {key:sessionStorage.getItem('estate-admin') || '', status:null, page:'overview', nonce:0,
   properties:[], templates:[], propertyFilter:'all', customers:[], selectedPhone:null, conversationTab:'messages', overviewSnapshot:null,
   testPhone:sessionStorage.getItem('estate-test-phone'), testSessions:[], pending:{}, timer:null};
@@ -77,7 +83,7 @@ async function navigate() {
     state.status=await api('/status');
     $('.workspace-label strong').textContent=state.status.business_name;
     $('.workspace-avatar').textContent=state.status.business_name.trim().split(/\s+/).slice(0,2).map(part=>part[0]).join('').toUpperCase();
-    const renderer={overview:renderOverview,properties:renderProperties,conversations:renderConversations,test:renderTest,settings:renderSettings}[state.page];
+    const renderer={overview:renderOverview,properties:renderProperties,portal:renderPortal,conversations:renderConversations,test:renderTest,settings:renderSettings}[state.page];
     await renderer(nonce);
   } catch(error) {
     if(nonce!==state.nonce) return;
@@ -90,7 +96,7 @@ function scheduleOverview(nonce) {
   state.timer=setTimeout(async()=>{if(state.page!=='overview'||nonce!==state.nonce||!state.key)return;try{await renderOverview(nonce);}catch(error){toast('Overview could not refresh: '+error.message);if(state.key&&nonce===state.nonce)scheduleOverview(nonce);}},5000);
 }
 function openBuyerLinks() {
-  document.querySelectorAll('[data-open-buyer]').forEach(link=>link.addEventListener('click',()=>{state.selectedPhone=link.dataset.openBuyer;state.conversationTab='messages';}));
+  document.querySelectorAll('[data-open-buyer]').forEach(link=>link.addEventListener('click',()=>{state.focusReply=true;state.selectedPhone=link.dataset.openBuyer;state.conversationTab='messages';}));
 }
 function buyerLink(phone,label='Open conversation ↗',kind='secondary') {
   return `<a href="#conversations" class="button ${kind}" data-open-buyer="${esc(phone)}">${esc(label)}</a>`;
@@ -116,12 +122,13 @@ function itineraryCard(visit, now) {
     <p>${esc(visit.buyer_name||visit.phone)}${visit.details.property_id?' · '+esc(visit.details.property_id):''}</p>
     <p>${esc(place||'Meeting point to verify')}</p>
     <div class="visit-status">${badge(passed?'Time passed':needsBuyer?'Awaiting buyer':'Awaiting dealer approval','amber')}${visit.property_available===false?badge('Marked unavailable','amber'):''}</div>
-    <p>${esc(next)}</p>
-    <div class="visit-actions">${buyerLink(visit.phone,'Open buyer chat ↗')}${directions}</div>
+    <p>${esc(next)}</p>${visit.calendar_state==='saved'?'<p>Saved to Apple Calendar</p>':visit.calendar_state==='pending'?'<p>Waiting to save to Apple Calendar</p>':visit.calendar_state==='retrying'?'<p>Calendar sync failed. Retrying automatically.</p>':visit.calendar_state==='needs_new_time'?'<p>Ask the buyer for a time tomorrow to save this request to Apple Calendar.</p>':''}
+    <div class="visit-actions">${buyerLink(visit.phone,'Open buyer chat ↗')}${directions}${state.status.calendar==='apple_calendar'&&visit.can_add_to_calendar?`<button class="button secondary" data-calendar-visit="${esc(visit.id)}">Add to Apple Calendar</button>`:''}</div>
   </article>`;
 }
 async function renderOverview(nonce) {
   const data=await api('/dashboard');if(nonce!==state.nonce)return;
+  if ($('#calendar-visits')?.open) { scheduleOverview(nonce); return; }
   const now=Date.now();
   const snapshot=nonce+state.overviewScope+JSON.stringify(data)+data.visits.filter(v=>visitTime(v.details.start_time)<now).length;
   if(state.overviewSnapshot===snapshot){scheduleOverview(nonce);return;}state.overviewSnapshot=snapshot;
@@ -131,6 +138,7 @@ async function renderOverview(nonce) {
   const followups=customers.filter(c=>c.paused&&!c.opted_out).sort((a,b)=>Number(Boolean(b.reply_needed))-Number(Boolean(a.reply_needed))||a.last_inbound-b.last_inbound);
   const needsReply=followups.filter(c=>c.reply_needed);
   const visits=data.visits.filter(v=>inScope(v)&&['pending_confirmation','requested'].includes(v.status));
+  const calendarVisits=visits.filter(v=>v.can_add_to_calendar);
   const upcoming=visits.filter(v=>visitTime(v.details.start_time)>=now)
     .sort((a,b)=>visitTime(a.details.start_time)-visitTime(b.details.start_time));
   const needsAttention=visits.filter(v=>!(visitTime(v.details.start_time)>=now));
@@ -151,10 +159,22 @@ async function renderOverview(nonce) {
     ].map(([value,label,note,symbol])=>`<div class="metric"><span class="metric-title">${label}</span><span class="metric-icon">${icon(symbol)}</span><div class="metric-value">${value}</div><span class="metric-note">${esc(note)}</span></div>`).join('')}</section>`+
     `<div class="overview-work-grid"><div class="card-stack"><section class="card"><div class="card-head"><div><h2>Human follow-ups</h2><p>${needsReply.length} waiting for a reply · ${followups.filter(c=>c.followup_status==='awaiting_buyer').length} awaiting buyer</p></div>${badge(followups.length+' open',followups.length?'amber':'neutral')}</div>${followups.length?`<div class="followup-list">${followups.slice(0,10).map(c=>`<article class="followup-item"><div class="followup-heading">${avatar(c.name)}<div><h3>${esc(c.name)}</h3><small>${c.test?'Synthetic buyer':esc(c.phone)} · Last inbound ${esc(waitingSince(c.last_inbound))}</small></div>${badge(({reply_needed:'Reply needed',reply_queued:'Reply queued',delivery_review:'Review delivery',awaiting_buyer:'Awaiting buyer'})[c.followup_status]||'Review conversation',c.reply_needed||c.followup_status==='delivery_review'?'amber':'neutral')}</div>${c.property_id?`<p class="followup-property">${esc(c.property_title)} · ${esc(c.property_id)}</p>`:''}<p>${esc(alertSummary(data.alerts.find(a=>a.phone===c.phone)?.detail||'Conversation taken over for human support.'))}</p><blockquote>${esc(c.last_message.slice(0,220))}</blockquote><div class="followup-actions">${buyerLink(c.phone,c.reply_needed?'Reply to buyer ↗':'Continue conversation ↗','primary')}<small>AI stays paused until you resume it</small></div></article>`).join('')}</div>`:empty('human','No buyers waiting for you',scope==='real'?'Real buyer handoffs will appear here. Use Test only to review simulated leads.':'Handoffs appear here with the buyer’s property and conversation context.')}</section>
     <section class="card"><div class="card-head"><div><h2>Recent conversations</h2><p>${customers.length} conversations · ${scopeName.toLowerCase()}</p></div>${linkButton('View inbox','conversations','ghost')}</div>${recent.length?`<div class="card-body">${recent.map(c=>`<a href="#conversations" class="row" data-open-buyer="${esc(c.phone)}">${avatar(c.name)}<div class="row-main"><strong>${esc(c.name)}</strong><p>${esc(c.last_message.slice(0,110))}</p><small>${esc(waitingSince(c.last_message_at))}${c.test?' · Test':''}</small></div>${badge(c.opted_out?'Opted out':c.paused?'With team':'AI active',c.paused?'amber':'neutral')}</a>`).join('')}</div>`:empty('conversations','No activity in this view','New enquiries and replies appear here.')}</section></div>
-    <div class="card-stack"><section class="card" aria-label="Visit itinerary"><div class="card-head"><div><h2>Visit itinerary</h2><p>${upcoming.length} upcoming · ${needsAttention.length} need a new time</p></div>${icon('visit')}</div>${visits.length?`<div class="card-body visit-list">${upcoming.map(v=>itineraryCard(v,now)).join('')}${needsAttention.length?`<h3>Time to review</h3>${needsAttention.map(v=>itineraryCard(v,now)).join('')}`:''}</div>`:empty('visit','No pending visits','Requests will appear here when a buyer proposes a visit.')}<div class="panel-note">Visit requests require team approval before booking.</div></section>
+    <div class="card-stack"><section class="card" aria-label="Visit itinerary"><div class="card-head"><div><h2>Visit itinerary</h2><p>${upcoming.length} upcoming · ${needsAttention.length} need a new time</p></div><button class="button secondary" id="open-calendar-visits">Add to Apple Calendar</button></div>
+    <dialog id="calendar-visits"><h2>Add to Apple Calendar</h2><div class="settings-rows">${state.status.calendar!=='apple_calendar'?'Open the dashboard on a Mac with Apple Calendar.':calendarVisits.length?calendarVisits.map(v=>`<button type="button" class="button secondary" data-calendar-visit="${esc(v.id)}">${esc(v.property_title||v.details.property_id||'Site visit')} · ${esc(visitDate(v.details.start_time))}${v.test?' · Test':''}</button>`).join(''):'No unsaved visit requests for tomorrow.'}</div><button type="button" class="button secondary" id="close-calendar-visits">Close</button></dialog>${visits.length?`<div class="card-body visit-list">${upcoming.map(v=>itineraryCard(v,now)).join('')}${needsAttention.length?`<h3>Time to review</h3>${needsAttention.map(v=>itineraryCard(v,now)).join('')}`:''}</div>`:empty('visit','No pending visits','Requests will appear here when a buyer proposes a visit.')}<div class="panel-note">Visit requests require team approval before booking.</div></section>
     <section class="card"><div class="card-head"><div><h2>Delivery & agent issues</h2><p>Review before sending another reply</p></div>${badge(issues.length+' to review',issues.length?'amber':'green')}</div>${issues.length?`<div class="card-body">${issues.slice(0,6).map(i=>`<div class="issue-item"><strong>${esc(customers.find(c=>c.phone===i.phone)?.name||i.phone)}</strong><p>${i.kind==='delivery_unknown'?'Delivery is uncertain. Check WhatsApp history before resending.':'Agent processing failed. Review the conversation and take over.'}</p>${buyerLink(i.phone,'Review conversation ↗')}</div>`).join('')}</div>`:empty('test','No recorded delivery or job failures','This reflects saved job and delivery states, not an end-to-end integration check.')}</section>
     <section class="card"><div class="card-head"><h2>Buyer context at a glance</h2></div>${buyerRows.length?`<div class="card-body">${buyerRows.map(c=>`<div class="context-row"><strong>${esc(c.name)}${c.test?' · Test':''}</strong><p>${esc(c.property_title||[c.preferences.bedrooms?c.preferences.bedrooms+' BHK':'',c.preferences.location].filter(Boolean).join(' · ')||'General enquiry')}</p><p>Confirmed budget: ${money(c.confirmed_budget)}</p>${buyerLink(c.phone,'View details ↗','ghost')}</div>`).join('')}</div>`:empty('properties','Property context appears here','A selected listing or saved buyer requirements will give your team a starting point.')}</section></div></div>`;
+  bind('#open-calendar-visits','click',()=>$('#calendar-visits').showModal());
+  bind('#close-calendar-visits','click',()=>$('#calendar-visits').close());
   openBuyerLinks();
+  document.querySelectorAll('[data-calendar-visit]').forEach(button => button.onclick = async () => {
+    button.disabled = true;
+    try {
+      const result = await api('/visits/'+encodeURIComponent(button.dataset.calendarVisit)+'/apple-calendar',{method:'POST'});
+      if ($('#calendar-visits')?.open) $('#calendar-visits').close();
+      toast(result.status==='already_added'?'Already in Apple Calendar.':'Added to Estate AI Visits in Apple Calendar.');
+    } catch(error) { toast(error.message); }
+    finally { button.disabled = false; }
+  });
   document.querySelectorAll('[data-overview-scope]').forEach(b=>b.addEventListener('click',()=>{state.overviewScope=b.dataset.overviewScope;sessionStorage.setItem('estate-overview-scope',state.overviewScope);renderOverview(nonce).catch(e=>toast(e.message));}));
   scheduleOverview(nonce);
 }
@@ -162,7 +182,7 @@ async function renderProperties(nonce) {
   state.properties=await api('/properties');if(nonce!==state.nonce)return;
   await preloadCovers(state.properties);if(nonce!==state.nonce)return;
   $('#content').innerHTML=heading('Good matches start with good inventory.','Keep property details current so your agent can recommend with confidence.',`<div class="heading-actions">${button('Import Excel','import-inventory','secondary','arrow')}${button('Browse templates','browse-templates','secondary','properties')}${button('Add property','add-property')}</div>`)+
-    `<div class="template-banner"><div><strong>More scenarios. Better testing.</strong><p>Explore 500 detailed fictional Biba templates across Mohali, Chandigarh, Panchkula, Zirakpur and Dera Bassi.</p></div>${button('Add sample properties','seed-properties','secondary','plus')}</div>`+
+    `<div class="template-banner"><div><strong>More scenarios. Better testing.</strong><p>Explore 800 detailed fictional Biba templates across Mohali, Chandigarh, Panchkula, Zirakpur and Dera Bassi.</p></div>${button('Add sample properties','seed-properties','secondary','plus')}</div>`+
     `<div class="toolbar"><label class="search-field">${icon('search')}<input id="property-search" placeholder="Search by title, city or property ID" aria-label="Search properties"></label><div class="filter-tabs" role="group" aria-label="Filter properties"><button data-filter="all" class="selected">All properties</button><button data-filter="available">Available</button><button data-filter="unavailable">Unavailable</button></div></div><div id="properties-results"></div>`;
   bind('#add-property','click',()=>openProperty());
   bind('#import-inventory','click',openInventoryImport);
@@ -185,7 +205,7 @@ function paintProperties() {
   bind('#property-prev','click',()=>{propertyPage--;paintProperties();});bind('#property-next','click',()=>{propertyPage++;paintProperties();});
 }
 async function showTemplates() {
-  $('#template-dialog .eyebrow').textContent=state.status.business_name+' · 500 fictional properties';
+  $('#template-dialog .eyebrow').textContent=state.status.business_name+' · 800 fictional properties';
   state.templates=await api('/property-templates');templatePage=0;$('#template-search').value='';
   paintTemplates();$('#template-dialog').showModal();
 }
@@ -198,6 +218,53 @@ function paintTemplates() {
   bind('#template-prev','click',()=>{templatePage--;paintTemplates();});bind('#template-next','click',()=>{templatePage++;paintTemplates();});
   document.querySelectorAll('[data-template-test]').forEach(b=>b.addEventListener('click',()=>openLead(b.dataset.templateTest)));
   document.querySelectorAll('[data-template]').forEach(b=>b.addEventListener('click',()=>{if(!state.status.demo_inventory_allowed||state.status.whatsapp_mode==='live'){toast('Demo templates require ALLOW_DEMO_DATA=true and simulation mode.');return;}const p=state.templates.find(p=>p.id===b.dataset.template);$('#template-dialog').close();const details={...p.details};delete details.housing_listing_id;openProperty({...p,details,id:p.id+'-'+crypto.randomUUID().slice(0,5),asking_price_inr:p.asking_price},true);}));
+}
+async function renderPortal(nonce) {
+  if(state.status.whatsapp_mode==='live'||!state.status.demo_inventory_allowed){
+    $('#content').innerHTML=heading('Test listing portal','Enable demo inventory in simulation mode to try a buyer enquiry.');
+    return;
+  }
+  const listings=await api('/property-templates');
+  if(nonce!==state.nonce)return;
+  $('#content').innerHTML=heading('Biba listings','Choose a fictional home to test a buyer enquiry.')+
+    `<section class="card"><div class="card-body"><form class="form-grid" id="portal-form">
+    <label>Buyer name<input name="buyer" required maxlength="80" autocomplete="off"></label>
+    <label>Search listings<input name="search" type="search" placeholder="City, locality or listing ID"></label>
+    <label class="full-width">Property<select name="listing" required></select></label>
+    <p class="full-width" id="portal-details"></p><button class="button primary" type="submit">I’m interested</button>
+    <p role="status" id="portal-status"></p></form></div></section>`;
+  const form=$('#portal-form'), fields=form.elements;
+  const preview=()=>{
+    const home=listings.find(item=>item.id===fields.listing.value);
+    $('#portal-details').textContent=home?home.description:'No matching listings.';
+    form.querySelector('button').disabled=!home;
+  };
+  const filter=()=>{
+    const query=fields.search.value.trim().toLowerCase();
+    const matches=listings.filter(home=>[home.city,home.locality,home.title,home.id].join(' ').toLowerCase().includes(query));
+    fields.listing.replaceChildren(...matches.map(home=>new Option(
+      home.title+' · '+home.locality+', '+home.city+' · '+price(home.asking_price),home.id)));
+    preview();
+  };
+  fields.search.addEventListener('input',filter);
+  fields.listing.addEventListener('change',preview);
+  filter();
+  form.addEventListener('submit',async event=>{
+    event.preventDefault();
+    const buyer=fields.buyer.value.trim();
+    if(!buyer){$('#portal-status').textContent='Enter a buyer name.';return;}
+    form.querySelector('button').disabled=true;
+    try {
+      const session=await api('/test-sessions',{method:'POST',body:JSON.stringify({
+        name:buyer+' · '+fields.listing.value,buyer_name:buyer,property_id:fields.listing.value,portal_interest:true
+      })});
+      state.testPhone=session.phone;
+      sessionStorage.setItem('estate-test-phone',session.phone);
+      location.hash='test';
+    } catch(error){
+      if(nonce===state.nonce){$('#portal-status').textContent=error.message;preview();}
+    }
+  });
 }
 async function openLead(propertyId='') {
   if(state.status.whatsapp_mode==='live'){toast('Switch to simulation mode to test a buyer enquiry.');return;}
@@ -313,13 +380,13 @@ async function renderConversations(nonce) {
   await paintConversation(nonce);
 }
 function recommendationCards(properties) {
-  return `<div class="chat-property-grid">${properties.map(p=>`<article class="chat-property-card"><div class="property-cover">${cover(p)}${badge(p.demo?'Fictional demo':p.available?'Available':'Unavailable',p.demo?'amber':p.available?'green':'neutral')}</div><div class="property-content"><h3>${esc(p.title)}</h3><p>${esc(p.locality)}, ${esc(p.city)} · ${p.bedrooms} BHK</p><div class="property-price">${price(p.asking_price_inr)}<small>asking price</small></div><p>${esc(p.id)}</p>${p.match_note?`<p class="related-note">${esc(p.match_note)}</p>`:''}<button type="button" class="button ghost" data-ask-property="${esc(p.id)}">Ask about this property ↗</button></div></article>`).join('')}</div>`;
+  return `<div class="chat-property-grid">${properties.map(p=>`<article class="chat-property-card"><div class="property-cover">${cover(p)}${badge(p.demo?'Fictional demo':p.available?'Available':'Unavailable',p.demo?'amber':p.available?'green':'neutral')}</div><div class="property-content"><h3>${esc(p.title)}</h3><p>${esc(p.locality)}, ${esc(p.city)} · ${p.bedrooms} BHK</p><div class="property-price">${price(p.asking_price_inr)}<small>asking price</small></div><p>${esc(p.id)}</p>${p.match_note?`<p class="related-note">${esc(p.match_note)}</p>`:''}${state.page==='test'?`<button type="button" class="button ghost" data-ask-property="${esc(p.id)}">Ask about this property ↗</button>`:''}</div></article>`).join('')}</div>`;
 }
 function chatMessages(messages,recommendations=[],outbox=[]) {
   const format = content => esc(content).replace(/\*\*([^\n]+?)\*\*/g,'<strong>$1</strong>').replace(/`([^`\n]+)`/g,'<code>$1</code>').replace(/^\*\s+/gm,'• ');
   return messages.map(m=>{
     const seen=new Set();
-    const groups=recommendations.filter(batch=>m.id==='reply:'+batch.source_message_id).map(batch=>{
+    const groups=recommendations.filter(batch=>m.id===(batch.message_id||'reply:'+batch.source_message_id)).map(batch=>{
       const properties=batch.properties.filter(p=>{if(seen.has(p.id))return false;seen.add(p.id);return true;});
       if(!properties.length)return '';
       const label=batch.kind==='related'?'Related properties':batch.kind==='selected'?'Your selected property':'Properties found';
@@ -335,7 +402,7 @@ function insights(customer) {
 }
 function proposalsView(proposals, confirm=false) {
   if(!proposals?.length)return '<p class="muted text-small">Budgets, offers and visit requests appear here after the agent records them.</p>';
-  return proposals.map(p=>`<article class="proposal"><div class="proposal-top"><strong>${esc({budget:'Buyer budget',offer:'Property offer',visit:'Site-visit request'}[p.kind]||p.kind)}</strong>${badge(p.status==='buyer_confirmed'?'Buyer confirmed':p.status==='requested'?'Dealer review':'Needs confirmation',p.status==='buyer_confirmed'?'green':'amber')}</div><p>${p.kind==='visit'?esc(visitDate(p.details.start_time)):money(p.details.amount_inr)}${p.details.property_id?' · '+esc(p.details.property_id):''}</p><p>${p.kind==='offer'?'An offer from the buyer; not an agreed sale price.':p.kind==='visit'?'Availability and booking still need dealer approval.':'Budget is separate from any property asking price.'}</p>${confirm&&p.status==='pending_confirmation'?`<button class="button secondary" data-confirm="${esc(p.id)}">Confirm these details ↗</button>`:''}<p>Source: <code>${esc(p.source_message_id)}</code></p>${p.confirmation_message_id?`<p>Confirmed in: <code>${esc(p.confirmation_message_id)}</code></p>`:''}</article>`).join('');
+  return proposals.map(p=>`<article class="proposal"><div class="proposal-top"><strong>${esc({budget:'Buyer budget',offer:'Property offer',visit:'Site-visit request'}[p.kind]||p.kind)}</strong>${badge(p.status==='buyer_confirmed'?'Buyer confirmed':p.status==='requested'?'Dealer review':'Needs confirmation',p.status==='buyer_confirmed'?'green':'amber')}</div><p>${p.kind==='visit'?esc(visitDate(p.details.start_time)):money(p.details.amount_inr)}${p.details.property_id?' · '+esc(p.details.property_id):''}</p><p>${p.kind==='offer'?'An offer from the buyer; not an agreed sale price.':p.kind==='visit'?'Availability and booking still need dealer approval.':'Budget is separate from any property asking price.'}</p>${confirm===('reply:'+p.source_message_id)&&p.status==='pending_confirmation'&&proposals.filter(other=>other.source_message_id===p.source_message_id).length===1?`<button class="button secondary" data-confirm="${esc(p.id)}">Confirm these details ↗</button>`:''}<p>Source: <code>${esc(p.source_message_id)}</code></p>${p.confirmation_message_id?`<p>Confirmed in: <code>${esc(p.confirmation_message_id)}</code></p>`:''}</article>`).join('');
 }
 function alertSummary(detail) {
   if(String(detail).startsWith('Confirmed visit:'))return 'Buyer confirmed a visit request. Review the time and arrange team approval.';
@@ -357,7 +424,8 @@ async function paintConversation(nonce) {
   const customer=state.customers.find(c=>c.phone===state.selectedPhone);
   if(!customer){$('#conversation-detail').innerHTML=empty('conversations','The context lives here','Select a conversation to explore its messages and buyer details.','','full-empty');return;}
   const phone=customer.phone;
-  const [conversation,activity]=await Promise.all([api('/conversations/'+phone),api('/conversations/'+phone+'/activity')]);
+  const [conversation,activity,recommendations]=await Promise.all([api('/conversations/'+phone),api('/conversations/'+phone+'/activity'),api('/conversations/'+phone+'/recommendations')]);
+  await preloadCovers(recommendations.batches.flatMap(batch=>batch.properties));
   if(nonce!==state.nonce||state.page!=='conversations'||state.selectedPhone!==phone)return;
   const focused=document.activeElement?.id==='human-reply-text';
   const selection=focused?[$('#human-reply-text').selectionStart,$('#human-reply-text').selectionEnd]:null;
@@ -366,10 +434,53 @@ async function paintConversation(nonce) {
   $('#conversation-detail').innerHTML=`<div class="detail-head">${avatar(customer.name)}<div><h2>${esc(customer.name)}</h2><p class="muted text-small">${customer.test?'Test session · ':''}${conversation.opted_out?'Opted out':conversation.paused?'With your team · AI paused':'AI replies enabled'}</p></div>${conversation.opted_out?badge('Opted out','red'):button(conversation.paused?'Resume AI':'Take over','toggle-pause','secondary','human')}</div>
     ${customer.property_id?`<div class="inbox-property"><strong>Interested property</strong> ${esc(customer.property_title)} · ${esc(customer.property_id)}</div>`:''}
     <div class="details-tabs">${[['messages','Messages'],['profile','Buyer details'],['activity','Activity & handoffs']].map(([key,label])=>`<button data-tab="${key}" class="${state.conversationTab===key?'selected':''}">${label}</button>`).join('')}</div>
-    ${state.conversationTab==='messages'?`<div class="chat-history" id="conversation-history">${conversation.messages.length?chatMessages(conversation.messages,[],conversation.outbox):empty('conversations','Waiting for the first hello','No messages in this conversation yet.')}</div><div class="human-compose"><div class="human-compose-head"><strong>Reply as ${esc(state.status.business_name)}</strong>${badge(customer.test?'App simulation':'WhatsApp',customer.test?'amber':'green')}</div><p>${customer.test?'Your reply appears in this test chat. Nothing is sent to WhatsApp.':'Your reply will be sent to this buyer on WhatsApp.'} AI remains paused until you resume it.</p>${conversation.manual_reply_available?`<form id="human-reply-form"><label class="sr-only" for="human-reply-text">Reply to buyer</label><textarea id="human-reply-text" aria-label="Reply to buyer" rows="3" maxlength="4000" required placeholder="Write your reply to the buyer…">${esc(draft.text)}</textarea><div class="human-compose-actions"><small>Human team reply · up to 4,000 characters</small><button type="submit" class="button primary" id="send-human-reply">${customer.test?'Send test reply':'Send WhatsApp reply'} ↗</button></div></form>`:`<div class="notice">${esc(unavailable)}</div>`}<p class="error-text" id="human-reply-error" role="alert"></p></div>`:state.conversationTab==='profile'?`<div class="card-body">${insights(customer)}<h3 style="margin:22px 0 13px">Budgets, offers & visit requests</h3>${proposalsView(customer.proposals)}</div>`:`<div class="card-body">${activityView(activity)}</div>`}`;
+    ${state.conversationTab==='messages'?`<div class="chat-history" id="conversation-history">${conversation.messages.length?chatMessages(conversation.messages,recommendations.batches,conversation.outbox):empty('conversations','Waiting for the first hello','No messages in this conversation yet.')}</div><div class="human-compose"><div class="human-compose-head"><strong>Reply as ${esc(state.status.business_name)}</strong>${badge(customer.test?'App simulation':'WhatsApp',customer.test?'amber':'green')}</div><p>${customer.test?'Your reply appears in this test chat. Nothing is sent to WhatsApp.':'Your reply will be sent to this buyer on WhatsApp.'} AI remains paused until you resume it.</p>${conversation.manual_reply_available?`<form id="human-reply-form"><label class="sr-only" for="human-reply-text">Reply to buyer</label><textarea id="human-reply-text" aria-label="Reply to buyer" rows="3" maxlength="4000" required placeholder="Write your reply to the buyer…">${esc(draft.text)}</textarea><div id="reply-preview" role="status" class="muted" style="white-space:pre-wrap"></div><div class="human-compose-actions"><button type="button" class="button secondary" id="suggest-reply" aria-label="Suggest a reply">🪄 Suggest reply</button><button type="button" class="button secondary" id="accept-reply" hidden>Accept suggestion (Tab)</button><button type="submit" class="button primary" id="send-human-reply">${customer.test?'Send test reply':'Send WhatsApp reply'} ↗</button></div></form>`:`<div class="notice">${esc(unavailable)}</div>`}<p class="error-text" id="human-reply-error" role="alert"></p></div>`:state.conversationTab==='profile'?`<div class="card-body">${insights(customer)}<h3 style="margin:22px 0 13px">Budgets, offers & visit requests</h3>${proposalsView(customer.proposals)}</div>`:`<div class="card-body">${activityView(activity)}</div>`}`;
   document.querySelectorAll('[data-tab]').forEach(b=>b.addEventListener('click',()=>{state.conversationTab=b.dataset.tab;paintConversation(nonce).catch(e=>toast(e.message));}));
   bind('#toggle-pause','click',async()=>{await api('/conversations/'+phone+(conversation.paused?'/resume':'/takeover'),{method:'POST'});toast(conversation.paused?'AI resumed for future messages.':'Conversation taken over. You can now reply.');await renderConversations(nonce);});
-  bind('#human-reply-text','input',event=>{draft.text=event.target.value;draft.token=crypto.randomUUID();});
+  function showSuggestion() {
+    const preview = $('#reply-preview');
+    if (!preview || state.selectedPhone !== phone) return;
+    const field = $('#human-reply-text');
+    const inline = draft.suggestion && !field.value;
+    field.placeholder = inline ? draft.suggestion : 'Write your reply to the buyer…';
+    field.rows = inline ? Math.min(12, Math.max(3, Math.ceil(draft.suggestion.length / 50))) : 3;
+    preview.textContent = draft.loading ? 'Writing a suggestion…' : (inline ? '' : draft.suggestion || '');
+    $('#accept-reply').hidden = !draft.suggestion;
+    $('#suggest-reply').disabled = Boolean(draft.loading);
+  }
+  function acceptSuggestion() {
+    if (!draft.suggestion) return;
+    const field = $('#human-reply-text');
+    field.value = draft.suggestion;
+    field.dispatchEvent(new Event('input'));
+    field.focus();
+    field.setSelectionRange(field.value.length, field.value.length);
+  }
+  showSuggestion();
+  bind('#accept-reply','click',acceptSuggestion);
+  bind('#human-reply-text','keydown',event=>{
+    if (event.key === 'Tab' && !event.shiftKey && draft.suggestion) {
+      event.preventDefault();
+      acceptSuggestion();
+    }
+  });
+  bind('#suggest-reply','click',async()=>{
+    const token = draft.token;
+    draft.loading = true;
+    draft.suggestion = '';
+    showSuggestion();
+    $('#human-reply-text').focus();
+    try {
+      const result = await api('/conversations/'+phone+'/suggest-reply',{
+        method:'POST',body:JSON.stringify({draft:draft.text})
+      });
+      if (draft.token === token) draft.suggestion = result.text;
+    } finally {
+      draft.loading = false;
+      showSuggestion();
+    }
+  });
+  bind('#human-reply-text','input',event=>{draft.suggestion="";draft.text=event.target.value;showSuggestion();draft.token=crypto.randomUUID();});
   bind('#human-reply-form','submit',async event=>{
     event.preventDefault();if(state.humanSending)return;state.humanSending=true;
     $('#send-human-reply').disabled=true;$('#human-reply-error').textContent='';
@@ -378,6 +489,7 @@ async function paintConversation(nonce) {
     finally{state.humanSending=false;if($('#send-human-reply'))$('#send-human-reply').disabled=false;}
   });
   const history=$('#conversation-history');if(history)history.scrollTop=history.scrollHeight;
+  if(state.focusReply){state.focusReply=false;$('#human-reply-text')?.focus();}
   if(focused&&$('#human-reply-text')){$('#human-reply-text').focus();$('#human-reply-text').setSelectionRange(...selection);}
   scheduleConversation(nonce,phone,JSON.stringify([conversation,activity]));
 }
@@ -400,7 +512,7 @@ async function renderTest(nonce) {
   if(!state.testSessions.some(s=>s.phone===state.testPhone))state.testPhone=state.testSessions[0]?.phone;
   if(state.testPhone)sessionStorage.setItem('estate-test-phone',state.testPhone);
   $('#content').innerHTML=heading('A conversation is the best test.','Meet your real agent. Explore its answers, tools and understanding.',button('New conversation','new-test','secondary'))+
-    `<div class="test-layout"><section class="card test-chat"><div class="card-head"><div><h2>${icon('test')} ${esc(state.status.business_name)} assistant</h2><p>${esc(state.status.model)} · via Ollama</p></div><select class="session-select" id="test-session-select" aria-label="Select test conversation">${state.testSessions.map(s=>`<option value="${s.phone}" ${s.phone===state.testPhone?'selected':''}>${esc(s.name)}</option>`).join('')}</select></div><div class="test-banner">${icon('test')}Real agent & tools · Test messages stay here. Nothing is sent to WhatsApp.</div><div id="test-history" class="chat-history"></div><div id="recommendation-controls" class="recommendation-controls"></div><div id="thinking" class="thinking" hidden>Agent is thinking and checking its tools…</div><div class="chat-compose"><form id="chat-form"><textarea id="chat-input" aria-label="Message your agent" rows="2" maxlength="4000" placeholder="Ask about a property, share a budget, or request a visit…" required></textarea><button class="button primary" id="send-message" type="submit" aria-label="Send message">${icon('send')}</button></form><small>Enter to send · Shift + Enter for a new line · Synthetic buyer session</small><p id="chat-error" class="error-text" role="alert"></p></div></section>
+    `<div class="test-layout"><section class="card test-chat"><div class="card-head"><div><h2>${icon('test')} ${esc(state.status.business_name)} assistant</h2><p>${esc(state.status.model)} · ${esc(modelProviders[state.status.provider])}</p></div><select class="session-select" id="test-session-select" aria-label="Select test conversation">${state.testSessions.map(s=>`<option value="${s.phone}" ${s.phone===state.testPhone?'selected':''}>${esc(s.name)}</option>`).join('')}</select></div><div class="test-banner">${icon('test')}Real agent & tools · Test messages stay here. Nothing is sent to WhatsApp.</div><div id="test-history" class="chat-history"></div><div id="recommendation-controls" class="recommendation-controls"></div><div id="thinking" class="thinking" hidden>Agent is thinking and checking its tools…</div><div class="chat-compose"><form id="chat-form"><textarea id="chat-input" aria-label="Message your agent" rows="2" maxlength="4000" placeholder="Ask about a property, share a budget, or request a visit…" required></textarea><button class="button primary" id="send-message" type="submit" aria-label="Send message">${icon('send')}</button></form><small>Enter to send · Shift + Enter for a new line · Synthetic buyer session</small><p id="chat-error" class="error-text" role="alert"></p></div></section>
     <aside class="test-context card-stack"><section class="card"><div class="card-head"><div><h2>What your agent knows</h2><p>Saved buyer requirements</p></div>${icon('human')}</div><div class="card-body" id="test-insights"></div></section><section class="card"><div class="card-head"><h2>Confirmations & requests</h2></div><div class="card-body" id="test-proposals"></div></section><section class="card"><div class="card-head"><div><h2>Agent activity</h2><p>Actual tool calls and handoffs</p></div></div><div class="card-body" id="test-activity"></div></section></aside></div>`;
   bind('#new-test','click',()=>openLead());
   bind('#test-session-select','change',async event=>{state.testPhone=event.target.value;sessionStorage.setItem('estate-test-phone',state.testPhone);await loadTestData();if(state.pending[state.testPhone])pollTest();});
@@ -411,7 +523,7 @@ async function renderTest(nonce) {
 async function loadTestData() {
   const phone=state.testPhone;
   if(!phone){$('#test-history').innerHTML=empty('test','Testing is unavailable','Switch WHATSAPP_MODE to simulate and restart the backend.');$('#send-message').disabled=true;return;}
-  const [conversation,customers,activity,recommendations]=await Promise.all([api('/conversations/'+phone),api('/conversations'),api('/conversations/'+phone+'/activity'),api('/conversations/'+phone+'/recommendations')]);
+  const [conversation,customers,activity,recommendations]=await Promise.all([api('/conversations/'+phone),api('/conversations?phone='+encodeURIComponent(phone)),api('/conversations/'+phone+'/activity'),api('/conversations/'+phone+'/recommendations')]);
   await preloadCovers(recommendations.batches.flatMap(batch=>batch.properties));
   if(state.page!=='test'||phone!==state.testPhone)return;
   const waiting = conversation.jobs?.find(job=>['pending','processing'].includes(job.state));
@@ -423,7 +535,7 @@ async function loadTestData() {
   if(nearBottom||state.pending[phone])history.scrollTop=history.scrollHeight;
   const lead=state.testSessions.find(s=>s.phone===phone);
   $('#test-insights').innerHTML=(lead?.property_id?`<div class="lead-context"><strong>Buyer: ${esc(lead.buyer_name||customer?.name)}</strong><p>Interested in ${esc(lead.property?.title||lead.property_id)}</p><p>${esc(lead.property_id)} · ${esc(lead.listing_id||'Manual property selection')}</p><small>Simulated lead · ${esc(state.status.business_name)} AI assistant</small></div>`:'')+insights(customer);
-  $('#test-proposals').innerHTML=proposalsView(customer?.proposals,true);
+  $('#test-proposals').innerHTML=proposalsView(customer?.proposals,conversation.messages.at(-1)?.id);
   $('#test-activity').innerHTML=activityView(activity);
   const paused=conversation.paused||conversation.opted_out;
   const blocked=Boolean(state.pending[phone])||paused||state.status.whatsapp_mode==='live';
@@ -438,7 +550,7 @@ async function loadTestData() {
   $('#thinking').textContent=paused?'Saving buyer message…':'Agent is thinking and checking its tools…';
   $('#chat-error').textContent=conversation.opted_out?'This test buyer opted out. Start a new conversation.':paused?'AI is paused. You can still send buyer messages here. Reply as the company from Conversations, or resume AI there.':'';
   document.querySelectorAll('[data-prompt]').forEach(b=>b.addEventListener('click',()=>{ $('#chat-input').value=b.dataset.prompt;$('#chat-input').focus();}));
-  document.querySelectorAll('[data-confirm]').forEach(b=>b.addEventListener('click',()=>sendTestMessage('CONFIRM '+b.dataset.confirm).catch(e=>toast(e.message))));
+  document.querySelectorAll('[data-confirm]').forEach(b=>b.addEventListener('click',()=>sendTestMessage('Yes').catch(e=>toast(e.message))));
   document.querySelectorAll('[data-ask-property]').forEach(b=>b.addEventListener('click',()=>{$('#chat-input').value='Tell me more about property '+b.dataset.askProperty;$('#chat-input').focus();}));
   if(conversation.paused&&!state.pending[phone]){clearTimeout(state.timer);state.timer=setTimeout(()=>{if(state.page==='test'&&state.testPhone===phone)loadTestData().catch(error=>toast(error.message));},4000);}
 }
@@ -464,22 +576,166 @@ function pollTest() {
       const job=await api('/jobs/'+encodeURIComponent(eventId));
       const terminal=['done','failed','suppressed'].includes(job.state);
       if(terminal)delete state.pending[phone];
-      if(state.page==='test'&&phone===state.testPhone){await loadTestData();
-        if(job.state==='failed')$('#chat-error').textContent='The model could not complete this message after retries. Check Settings → Check connection, then start a new test.';
-        if(!terminal)pollTest();}
+      if(state.page==='test'&&phone===state.testPhone){
+        if(!terminal){pollTest();return;}
+        await loadTestData();
+        if(job.state==='failed')$('#chat-error').textContent='The model could not complete this message after retries. Check the active model in Settings, then start a new test.';
+      }
     } catch(error){if(state.page==='test'){$('#chat-error').textContent=error.message;delete state.pending[phone];$('#thinking').hidden=true;$('#send-message').disabled=false;}}
-  },1300);
+  },500);
 }
 async function renderSettings(nonce) {
   if(nonce!==state.nonce)return;const s=state.status;
   const setting=(label,value)=>`<div class="setting-row"><span>${esc(label)}</span><code>${esc(value)}</code></div>`;
-  $('#content').innerHTML=heading('The essentials behind your agent.','Model configuration and integration status. Everything in plain sight.',badge('Company identity · editable'))+
-    `<div class="settings-grid"><div class="card-stack"><section class="card"><div class="card-head"><div><h2>AI model</h2><p>The engine behind every conversation</p></div>${badge('Ollama','green')}</div><div class="card-body"><div class="settings-rows">${setting('Model',s.model)}${setting('API endpoint',s.ollama_base_url)}${setting('Authentication',s.ollama_api_key_required?(s.ollama_api_key_configured?'API key configured':'API key missing'):'Local Ollama · signed-in account')}${setting('Separate API key',s.ollama_api_key_required?'Required':'Not required for localhost')}${setting('Background worker',s.worker_enabled?'Enabled':'Disabled')}</div><div style="margin-top:20px">${button('Check connection','check-ollama','secondary','arrow')}</div><div id="connection-check" aria-live="polite"></div><p class="settings-note">Connection checks reach the configured endpoint and look for this model. They do not verify inference or cloud sign-in. Test Your Agent exercises the real model.</p></div></section>
-    <section class="card"><div class="card-head"><h2>Workspace</h2></div><div class="card-body settings-rows"><form id="company-form"><label>Company name<input id="company-name" required maxlength="120" value="${esc(s.business_name)}"></label><p class="muted text-small">Used in new AI replies and handoff messages. Existing conversation history stays unchanged.</p><button type="submit" class="button secondary" id="save-company">Save company name ↗</button><p id="company-result" role="status"></p></form>${setting('Business timezone',s.timezone)}${setting('Database',s.database)}${setting('Demo inventory permission',s.demo_inventory_allowed?'Allowed in simulation':'Disabled')}</div></section></div>
-    <div class="card-stack"><section class="card"><div class="card-head"><div><h2>Integrations</h2><p>Configured does not always mean connected</p></div></div><div class="card-body"><div class="integration"><span class="integration-icon">${icon('test')}</span><div><h3>Ollama</h3><p id="ollama-integration-note">${s.ollama_configured?'Configured · connection not checked':'Configuration incomplete'}</p></div><span id="ollama-integration-badge">${badge('Not checked')}</span></div><div class="integration"><span class="integration-icon">${icon('conversations')}</span><div><h3>WhatsApp</h3><p>${s.whatsapp_mode==='simulate'?'Test conversations only · no messages sent':s.whatsapp_credentials_configured?'Credentials configured · delivery not verified':'Credentials missing'}</p></div>${badge(s.whatsapp_mode==='simulate'?'Simulation':'Live mode',s.whatsapp_mode==='simulate'?'amber':'blue')}</div><div class="integration"><span class="integration-icon">${icon('visit')}</span><div><h3>Google Calendar</h3><p>Visits are requests pending dealer approval</p></div>${badge('Not connected')}</div><div class="integration"><span class="integration-icon">${icon('properties')}</span><div><h3>99acres & Housing.com</h3><p>Lead-source adapters are planned</p></div>${badge('Not connected')}</div></div></section>
-    <section class="card"><div class="card-head"><h2>Change your configuration</h2></div><div class="card-body"><p class="muted text-small">Edit your local <code>.env</code> file and restart the backend to change the model, endpoint or integration settings. Credentials are never displayed on this page.</p><div class="notice" style="margin:18px 0 0">Your current agent uses a configurable model connection. When you’re ready to deploy, you can switch the endpoint and model, or add another provider adapter.</div></div></section></div></div>`;
+  $('#content').innerHTML=heading('The essentials behind your agent.','Model configuration and integration status. Everything in plain sight.',button('Soul','open-soul','secondary','settings'))+
+    `<div class="settings-grid"><div class="card-stack"><section class="card"><div class="card-head"><div><h2>AI model</h2><p>Used for new agent replies</p></div>${badge(modelProviders[s.provider],'green')}</div><div class="card-body">
+    <div class="settings-rows">${setting('Active model',s.model)}${setting('Background worker',s.worker_enabled?'Enabled':'Disabled')}</div>
+    <form id="model-form" class="form-grid">
+      <label class="full-width">Provider<select id="model-provider">${Object.entries(modelProviders).map(([id,name])=>`<option value="${id}" ${id===s.provider?'selected':''}>${esc(name)}</option>`).join('')}</select></label>
+      <div id="hosted-model-fields" class="full-width form-grid">
+        <label class="full-width">Model ID<select id="model-id"></select></label>
+        <label class="full-width" id="custom-model-field" hidden>Custom model ID<input id="custom-model-id" maxlength="160" autocomplete="off" spellcheck="false"><small>Enter a tool-capable model ID available to your provider account.</small></label>
+        <label class="full-width">API key<input id="model-api-key" type="password" maxlength="4096" autocomplete="new-password" spellcheck="false"><small id="model-key-hint"></small></label>
+      </div>
+      <div class="full-width"><button type="submit" class="button primary" id="save-model">Check and save</button></div>
+      <p class="full-width text-small" id="model-result" role="status"></p>
+    </form>
+    ${s.provider==='ollama'?`<div class="settings-rows">${setting('Ollama endpoint',s.ollama_base_url)}${setting('Authentication',s.ollama_api_key_required?(s.ollama_api_key_configured?'API key configured':'API key missing'):'Local Ollama account')}</div>
+    <div style="margin-top:20px">${button('Check Ollama connection','check-ollama','secondary','arrow')}</div><div id="connection-check" aria-live="polite"></div>`:''}
+    </div></section>
+    <section class="card"><div class="card-head"><h2>Workspace</h2></div><div class="card-body settings-rows">
+    <dialog id="soul-panel" aria-labelledby="soul-title"><h2 id="soul-title">Soul of the agent</h2>
+    <label>Import Markdown<input type="file" id="soul-file" accept=".md,.markdown,text/markdown"></label>
+    <label>How should the agent respond?<textarea id="soul-text" rows="12" maxlength="12000" placeholder="Use a warm tone and ask one question at a time."></textarea></label>
+    <button type="button" class="button secondary" id="generate-soul">🪄 Generate Soul</button>
+    <button type="button" class="button secondary" id="download-soul">Download soul.md</button>
+    <p id="soul-status" role="status"></p><button class="button primary" id="save-soul">Save soul</button> <button class="button secondary" id="close-soul">Cancel</button></dialog><form id="company-form"><label>Company name<input id="company-name" required maxlength="120" value="${esc(s.business_name)}"></label><p class="muted text-small">Used in new AI replies and handoff messages. Existing conversation history stays unchanged.</p><button type="submit" class="button secondary" id="save-company">Save company name ↗</button><p id="company-result" role="status"></p></form>${setting('Business timezone',s.timezone)}${setting('Database',s.database)}${setting('Demo inventory permission',s.demo_inventory_allowed?'Allowed in simulation':'Disabled')}</div></section></div>
+    <div class="card-stack"><section class="card"><div class="card-head"><div><h2>Integrations</h2><p>Configured does not always mean connected</p></div></div><div class="card-body"><div class="integration"><span class="integration-icon">${icon('conversations')}</span><div><h3>WhatsApp</h3><p>${s.whatsapp_mode==='simulate'?'Test conversations only · no messages sent':s.whatsapp_credentials_configured?'Credentials configured · delivery not verified':'Credentials missing'}</p></div>${badge(s.whatsapp_mode==='simulate'?'Simulation':'Live mode',s.whatsapp_mode==='simulate'?'amber':'blue')}</div><div class="integration"><span class="integration-icon">${icon('visit')}</span><div><h3>Apple Calendar</h3><p>Buyer-confirmed requests for tomorrow in India time are added automatically for dealer review.</p></div>${s.calendar==='apple_calendar'?button('Check connection','check-calendar','secondary','visit'):badge('Requires macOS')}</div><div class="integration"><span class="integration-icon">${icon('properties')}</span><div><h3>99acres & Housing.com</h3><p>Lead-source adapters are planned</p></div>${badge('Not connected')}</div></div></section></div></div>`;
+  const modelForm=$('#model-form'), provider=$('#model-provider'), model=$('#model-id'), key=$('#model-api-key');
+  const saveModel=$('#save-model'), result=$('#model-result');
+  const customModel=$('#custom-model-id');
+  const paintCustomModel=()=>{
+    const isCustom=model.value==='__custom__';
+    $('#custom-model-field').hidden=!isCustom;
+    customModel.required=isCustom;
+    customModel.disabled=!isCustom;
+  };
+  const paintModelFields=()=>{
+    const ollama=provider.value==='ollama', reuseKey=provider.value===s.provider&&s.model_key_configured;
+    $('#hosted-model-fields').hidden=ollama;
+    model.required=!ollama;
+    key.required=!ollama&&!reuseKey;
+    const savedModel=provider.value===s.provider&&!ollama?s.model:'';
+    const choices=new Set([...(modelPresets[provider.value]||[]), ...(savedModel?[savedModel]:[])]);
+    model.innerHTML='<option value="">Choose a model</option>'
+      + [...choices].map(id=>`<option value="${esc(id)}">${esc(id)}</option>`).join('')
+      + '<option value="__custom__">Enter a custom model ID</option>';
+    model.value=savedModel;
+    customModel.value='';
+    paintCustomModel();
+    key.value='';
+    $('#model-key-hint').textContent=reuseKey?'Leave blank to keep the saved key.':'Paste the API key for this provider.';
+    saveModel.disabled=ollama&&s.provider==='ollama';
+    saveModel.textContent=ollama?'Use Ollama':'Check and save';
+    result.textContent='';
+    result.classList.remove('error-text');
+  };
+  paintModelFields();
+  provider.addEventListener('change',paintModelFields);
+  model.addEventListener('change',paintCustomModel);
+  modelForm.addEventListener('submit',async event=>{
+    event.preventDefault();
+    const ollama=provider.value==='ollama';
+    saveModel.disabled=true;
+    provider.disabled=true;
+    result.classList.remove('error-text');
+    result.textContent=ollama?'Switching to Ollama…':'Checking the model…';
+    try {
+      const saved=await api('/settings/model',ollama?{method:'DELETE'}:{method:'PUT',
+        body:JSON.stringify({provider:provider.value,
+          model:model.value==='__custom__'?customModel.value.trim():model.value,api_key:key.value})});
+      key.value='';
+      if(nonce!==state.nonce)return;
+      Object.assign(state.status,saved);
+      await renderSettings(nonce);
+      const modelResult=$('#model-result');
+      if(modelResult)modelResult.textContent=`Saved. New replies use ${saved.model}.`;
+    } catch(error) {
+      key.value='';
+      result.textContent=error.message;
+      result.classList.add('error-text');
+    } finally {
+      saveModel.disabled=false;
+      provider.disabled=false;
+    }
+  });
+  bind('#check-calendar','click',async event=>{
+    const button = event.currentTarget;
+    await api('/integrations/apple-calendar/check',{method:'POST'});
+    button.textContent = 'Connected';
+  });
+  const soulPanel = $('#soul-panel'), soulText = $('#soul-text');
+  bind('#open-soul','click',async () => {
+    const saved = await api('/settings/soul');
+    soulText.value = saved.text;
+    $('#soul-file').value = '';
+    $('#soul-status').textContent = '';
+    soulPanel.showModal();
+  });
+  const soulStatus = $('#soul-status');
+  let generation = null;
+  soulPanel.addEventListener('close', () => generation?.abort());
+  bind('#generate-soul','click',async event => {
+    const generate = event.currentTarget;
+    const controls = [generate, soulText, $('#soul-file'), $('#save-soul'), $('#download-soul')];
+    generation = new AbortController();
+    controls.forEach(control => control.disabled = true);
+    soulStatus.textContent = 'Writing your Soul…';
+    try {
+      const result = await api('/settings/soul/generate', {
+        method:'POST', body:JSON.stringify({text:soulText.value}), signal:generation.signal
+      });
+      soulText.value = result.text;
+      soulStatus.textContent = 'Draft ready. Edit it, then save to apply.';
+    } catch (error) {
+      if (error.name !== 'AbortError') soulStatus.textContent = error.message;
+    } finally {
+      generation = null;
+      controls.forEach(control => control.disabled = false);
+    }
+  });
+  bind('#download-soul','click',() => {
+    if (!soulText.value.trim()) {
+      soulStatus.textContent = 'Write or generate a Soul first.';
+      return;
+    }
+    const url = URL.createObjectURL(new Blob([soulText.value], {type:'text/markdown;charset=utf-8'}));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'soul.md';
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
+  bind('#close-soul','click',() => soulPanel.close());
+  bind('#soul-file','change',async event => {
+    const file = event.target.files[0];
+    if (!file) return;
+    if (file.size > 48000) throw new Error('Soul instructions can contain up to 12,000 characters.');
+    const content = await file.text();
+    if (content.length > 12000) throw new Error('Soul instructions can contain up to 12,000 characters.');
+    soulText.value = content;
+  });
+  bind('#save-soul','click',async event => {
+    const save = event.currentTarget;
+    save.disabled = true;
+    try {
+      await api('/settings/soul',{method:'PUT',body:JSON.stringify({text:soulText.value})});
+      soulPanel.close();
+      toast('Soul saved for future AI replies.');
+    } finally { save.disabled = false; }
+  });
   bind('#company-form','submit',async event=>{event.preventDefault();$('#save-company').disabled=true;try{const saved=await api('/settings/company',{method:'PUT',body:JSON.stringify({business_name:$('#company-name').value.trim()})});state.status.business_name=saved.business_name;$('.workspace-label strong').textContent=saved.business_name;$('.workspace-avatar').textContent=saved.business_name.trim().split(/\s+/).slice(0,2).map(part=>part[0]).join('').toUpperCase();$('#company-result').textContent='Saved. New replies use '+saved.business_name+'.';}catch(error){$('#company-result').textContent=error.message;}finally{$('#save-company').disabled=false;}});
-  bind('#check-ollama','click',async()=>{const b=$('#check-ollama');b.disabled=true;b.textContent='Checking connection…';try{const result=await api('/integrations/ollama/check',{method:'POST'});if(state.page!=='settings')return;$('#connection-check').className='connection-result'+(!result.reachable||!result.model_available?' bad':'');$('#connection-check').textContent=result.message;$('#ollama-integration-badge').innerHTML=badge(result.reachable?(result.model_available?'Reachable':'Model not listed'):'Unreachable',result.reachable&&result.model_available?'green':'amber');$('#ollama-integration-note').textContent=result.reachable?'Endpoint checked just now':'Start Ollama and try again';}finally{if(state.page==='settings'){b.disabled=false;b.innerHTML=icon('arrow')+'Check connection';}}});
+  bind('#check-ollama','click',async()=>{const b=$('#check-ollama');b.disabled=true;b.textContent='Checking connection…';try{const result=await api('/integrations/ollama/check',{method:'POST'});if(state.page!=='settings')return;$('#connection-check').className='connection-result'+(!result.reachable||!result.model_available?' bad':'');$('#connection-check').textContent=result.message;}finally{if(state.page==='settings'){b.disabled=false;b.innerHTML=icon('arrow')+'Check Ollama connection';}}});
 }
 bind('#property-form','submit',async event=>{
   event.preventDefault();const form=event.currentTarget;const values=new FormData(form);

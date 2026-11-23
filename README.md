@@ -13,8 +13,7 @@ Implemented:
   retrieve different matches. Searches support city, locality, BHK, INR budget and a bounded result limit.
   Empty results never silently relax the buyer's criteria; the agent asks which preference to change.
   The agent can use a stated budget provisionally while its explicit confirmation is pending.
-- Buyer budgets, property offers and listing asking prices remain distinct. Confirmation requires
-  the buyer's exact `CONFIRM <proposal_id>` message; source and confirmation messages are retained.
+- Buyer budgets, property offers and listing asking prices remain distinct. The agent shows available homes before asking to save a budget. A direct yes confirms the displayed budget and any named property interest. A direct yes also confirms the displayed offer or visit request for dealer review.
 - Persistent conversation history, inbox/outbox, duplicate inbound-event protection,
   bounded agent retries, WhatsApp signature verification and delivery-status callbacks.
 - Immediate STOP handling, human takeover, service-window checks and dealer alerts through the API.
@@ -93,6 +92,18 @@ You can also stop the API and run:
 This uses real cloud inference and a synthetic buyer identity. Without inventory the assistant
 must report no verified matches. It should not invent listings.
 
+## Choose a model locally
+
+Open **Settings → AI model** and choose Google Gemini, Anthropic Claude, or OpenAI.
+Choose a model from **Model ID**, or select **Enter a custom model ID** for another model that
+supports function calling. Paste the provider key and select **Check and save**.
+The check sends a short synthetic prompt. New replies use the
+selected model, and **Test Your Agent** shows the active provider and model.
+
+The backend saves the key to the git-ignored `.env.model` file with user-only permissions.
+Change a model for the active provider with the key field blank to reuse the saved key.
+Choose **Ollama → Use Ollama** to remove the saved key and return to the `.env` configuration.
+
 ## Run the dealer workspace on a phone
 
 Open the deployed HTTPS dashboard on your phone and unlock it with your workspace admin key.
@@ -110,6 +121,8 @@ same Wi-Fi network on both devices. Use test data and a development key for this
 ## Dealer visit itinerary
 
 Open **Overview → Visit itinerary** to see upcoming requests in India time, ordered by proposed start time.
+The agent accepts visit requests for tomorrow only (Asia/Kolkata). On macOS, the worker adds buyer-confirmed
+requests to **Estate AI Visits** in Apple Calendar for dealer review. Check access in **Settings → Integrations**.
 Requests with past or missing times appear under **Time to review**. Each card shows who needs to confirm,
 the inventory availability flag if the property is marked unavailable, and a shortcut to the buyer conversation.
 Add a verified address in **Properties** for directions. With only a locality or city, the card links to the area.
@@ -134,12 +147,12 @@ event and make buyer invitations an explicit choice. [Google Calendar event crea
 1. **Settings:** inspect the model (`gemma4:31b-cloud`), endpoint, authentication, worker and integration
    configuration. Click **Check connection** to query Ollama's model list. A successful check means
    reachable/listed, not authenticated cloud inference. Credentials are never returned in the settings API.
-   The company name is editable in Settings and saved in MongoDB. Other settings remain read-only: edit the environment and restart/redeploy to change them.
+   The company name is editable in Settings and saved in MongoDB. The local AI model is configurable from the same page.
 2. **Properties:** add or edit dealer-verified inventory. Prices use INR, not lakh units. Set a property
    unavailable to remove it from the agent's recommendations. Search and availability filters are included.
-   **Browse templates** offers 500 detailed fictional Biba 1–4 BHK examples across Mohali, Chandigarh, Panchkula,
+   **Browse templates** offers 800 detailed fictional Biba 1–4 BHK examples across Mohali, Chandigarh, Panchkula,
    Zirakpur and Dera Bassi. **Use template** opens an editable draft with a new ID; it stays labelled
-   as demo data. **Add sample properties** adds the 500 fixtures once without overwriting existing
+   as demo data. **Add sample properties** adds the 800 fixtures once without overwriting existing
    listings or resetting edited sample prices. Demo creation/editing requires `ALLOW_DEMO_DATA=true`
    and simulation mode. Demo/real classification cannot be changed after creation.
    In **Add property**, **Edit details** or **Use template**, select photos before saving. Up to 10
@@ -147,10 +160,12 @@ event and make buyer invitations an explicit choice. [Google Calendar event crea
    Photos persist in MongoDB and load only through authenticated API requests. The first
    photo is the cover; remove photos from the editor if needed. Photo upload errors retain the
    property and successful uploads so the remaining images can be retried.
+**Test listing portal:** choose a fictional property, enter a buyer name and click **I’m interested** to open the agent’s greeting in the workspace.
+
 3. **Test Your Agent:** create/select a saved synthetic buyer session and send a message. The backend
    queues it, the real Gemma agent runs its tools, and the page polls for the response. Buyer requirements,
    proposal confirmations and actual tool/handoff activity appear alongside the chat. Confirming a card
-   sends the exact `CONFIRM <id>` message through the same backend confirmation flow.
+   sends a plain `Yes` through the same backend confirmation flow.
    Every retrieved listing is also shown as a property card with price, locality, BHK and any uploaded
    cover photo. **Show more matches** runs the search tool directly with the most recent filters,
    excludes previously retrieved listings and queues a durable reply; it does not depend on the model
@@ -227,7 +242,7 @@ Invoke-RestMethod -Uri http://127.0.0.1:8000/api/conversations/919000000001 -Hea
 
 The example property is an input example, **not verified real inventory**. Replace it before live use.
 For explicitly fictional inventory, set `ALLOW_DEMO_DATA=true` and call `POST /api/demo/seed`
-or use **Add sample properties** on the Properties page. This creates up to 500 sample listings.
+or use **Add sample properties** on the Properties page. This creates up to 800 sample listings.
 Demo listings are flagged and hidden from tools unless allowed. Live mode rejects demo-data permission.
 
 API routes:
@@ -310,7 +325,7 @@ to configure your Google Cloud project and GitHub `production` environment.
 
 ## Contextual Biba enquiry testing
 
-See [the research and walkthrough](docs/BIBA_PROPERTY_RESEARCH.md) for the 500 fictional templates,
+See [the research and walkthrough](docs/BIBA_PROPERTY_RESEARCH.md) for the 800 fictional templates,
 unique Housing listing mappings, buyer/property context, and saved dealer handoff summaries.
 Choose Properties → Browse templates → Test this property, enter a synthetic buyer name, and say Hi.
 Simulation mode and demo permission are required; no WhatsApp account is needed for these tests.

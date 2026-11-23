@@ -1,10 +1,13 @@
 import json
+from datetime import timedelta
 
 import httpx
 from fastapi.testclient import TestClient
 
+from estate_ai import apple_calendar
 from estate_ai.db import Audit, Customer, Property, PropertyMetadata, Proposal
 from estate_ai.main import create_app
+from estate_ai.schemas import visit_tomorrow
 
 HEADERS = {"X-API-Key": "test-admin-secret"}
 
@@ -137,6 +140,7 @@ def test_ollama_connection_check_reports_listing_without_claiming_inference(fact
         "AsyncClient",
         lambda **kwargs: original_client(**kwargs, transport=httpx.MockTransport(handler)),
     )
+    monkeypatch.setattr(apple_calendar, "available", lambda: False)
     with TestClient(create_app(settings, factory)) as client:
         data = client.post("/api/integrations/ollama/check", headers=HEADERS).json()
         assert data["reachable"] and data["model_available"]
@@ -145,6 +149,38 @@ def test_ollama_connection_check_reports_listing_without_claiming_inference(fact
         assert status["whatsapp_mode"] == "simulate"
         assert not status["whatsapp_credentials_configured"]
         assert status["calendar"] == "not_connected"
+
+
+def test_dashboard_calendar_enforces_tomorrow_and_returns_existing_save(factory, settings, monkeypatch):
+    tomorrow = visit_tomorrow()
+    with factory() as session:
+        for proposal_id, day in (("today", tomorrow - timedelta(days=1)), ("tomorrow", tomorrow)):
+            session.add(
+                Proposal(
+                    id=proposal_id,
+                    phone="919876543210",
+                    kind="visit",
+                    source_message_id="msg",
+                    payload=json.dumps({"property_id": "p1", "start_time": f"{day}T16:00:00+05:30"}),
+                )
+            )
+        session.commit()
+
+    saved = []
+
+    def add_visit(row, title):
+        saved.append((row.id, title))
+        return {"status": "added"}
+
+    monkeypatch.setattr(apple_calendar, "add_visit", add_visit)
+    with TestClient(create_app(settings, factory)) as client:
+        visits = client.get("/api/dashboard", headers=HEADERS).json()["visits"]
+        assert {v["id"]: v["can_add_to_calendar"] for v in visits} == {"today": False, "tomorrow": True}
+        assert client.post("/api/visits/today/apple-calendar", headers=HEADERS).status_code == 422
+        url = "/api/visits/tomorrow/apple-calendar"
+        assert client.post(url, headers=HEADERS).json() == {"status": "added"}
+        assert client.post(url, headers=HEADERS).json() == {"status": "already_added"}
+    assert saved == [("tomorrow", "p1")]
 
 
 def test_ollama_connection_check_handles_unreachable_server(factory, settings, monkeypatch):

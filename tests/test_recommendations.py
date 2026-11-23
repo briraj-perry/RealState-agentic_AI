@@ -26,7 +26,9 @@ def test_more_properties_returns_new_matches_without_other_buyer_leakage(factory
         assert not ({p["id"] for p in first} & {p["id"] for p in more})
         assert all(p["asking_price_inr"] <= 10000000 for p in first + more)
         other = ToolService(session, "919876543211", "other-source", allow_demo=True)
-        other_first = other.execute("search_properties", {"max_price": 10000000, "exclude_seen": True})
+        other_first = other.execute(
+            "search_properties", {"max_price": 10000000, "exclude_seen": True, "limit": 3}
+        )
         assert [p["id"] for p in other_first["properties"]] == [p["id"] for p in first]
 
 

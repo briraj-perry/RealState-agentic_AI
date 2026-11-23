@@ -3,8 +3,14 @@ from uuid import uuid4
 
 import pytest
 
+from estate_ai import model_providers
 from estate_ai.config import Settings
 from estate_ai.db import connect
+
+
+@pytest.fixture(autouse=True)
+def isolated_model_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(model_providers, "MODEL_FILE", tmp_path / ".env.model")
 
 
 @pytest.fixture

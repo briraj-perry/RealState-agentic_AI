@@ -1,11 +1,14 @@
 import asyncio
 import logging
+import re
 
+from fastapi import HTTPException
 from pymongo.errors import DuplicateKeyError
 
+from estate_ai import apple_calendar
 from estate_ai.agent import EstateAgent
-from estate_ai.db import Audit, Customer, Job, Message, Outbox, TestSession, now
-from estate_ai.document_query import select
+from estate_ai.db import Audit, Customer, Job, Message, Outbox, Proposal, TestSession, now
+from estate_ai.document_query import or_, select
 from estate_ai.messaging import WhatsAppClient
 from estate_ai.schemas import HandoffArgs
 from estate_ai.tools import ToolService, confirm_proposal
@@ -77,6 +80,33 @@ class Worker:
             await self.process_one()
             await self.send_one()
 
+    async def sync_calendar(self):
+        if not apple_calendar.available():
+            return
+        with self.factory() as session:
+            row = session.scalar(
+                select(Proposal)
+                .where(
+                    Proposal.kind == "visit",
+                    Proposal.status == "requested",
+                    Proposal.calendar_state.in_(["pending", "retrying", "", None]),
+                    or_(Proposal.calendar_retry_at.is_(None), Proposal.calendar_retry_at <= now()),
+                )
+                .order_by(Proposal.created)
+                .limit(1)
+            )
+            if not row:
+                return
+            try:
+                await apple_calendar.save_visit(session, row)
+            except HTTPException as exc:
+                if exc.status_code == 422:
+                    row.calendar_state = "needs_new_time"
+                else:
+                    row.calendar_state = "retrying"
+                    row.calendar_retry_at = now() + 60
+            session.commit()
+
     async def process_one(self):
         with self.factory() as session:
             job = session.scalar(select(Job).where(Job.state == "pending").order_by(Job.created).limit(1))
@@ -114,11 +144,16 @@ class Worker:
                     reply = ToolService(
                         session, phone, job.id, self.settings.allow_demo_data
                     ).related_properties()
-                elif job.id.startswith("more:"):
+                elif job.id.startswith("more:") or job.text.strip().casefold().rstrip(".!?") in {
+                    "show more properties",
+                    "show me more properties",
+                    "more properties",
+                    "show more matches",
+                }:
                     reply = ToolService(
                         session, phone, job.id, self.settings.allow_demo_data
                     ).more_properties()
-                elif job.text.strip().casefold().startswith("confirm "):
+                elif re.fullmatch(r"confirm\s+[a-f0-9]{32}", job.text.strip(), re.IGNORECASE):
                     reply = confirm_proposal(session, phone, job.text, job.id)
                 else:
                     reply = await self.agent.reply(session, phone, job.id)
@@ -225,6 +260,7 @@ class Worker:
         while True:
             try:
                 await self.tick()
+                await self.sync_calendar()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - Keep the worker alive with sanitized failures.

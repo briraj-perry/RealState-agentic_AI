@@ -62,12 +62,14 @@ class Message(Record):
 
 class WorkspaceSettings(Record):
     collection = "workspace_settings"
+    soul = Field("")
     id, business_name = Field("identity"), Field()
 
 
 class TestSession(Record):
     collection, pk = "test_sessions", "phone"
     phone, name, created = Field(), Field(), Field(now)
+    source = Field("Simulated Housing.com enquiry")
     buyer_name, property_id, listing_id = Field(""), Field(""), Field("")
 
 
@@ -100,6 +102,7 @@ class InventoryImport(Record):
 
 
 class Proposal(Record):
+    calendar_state, calendar_retry_at = Field(""), Field(0)
     collection = "proposals"
     id, phone, kind, payload = Field(uid), Field(), Field(), Field()
     source_message_id, confirmation_message_id = Field(), Field(None)

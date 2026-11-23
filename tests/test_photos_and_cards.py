@@ -133,13 +133,13 @@ def test_browse_and_more_cards_are_bound_to_real_tool_results_and_photos(factory
         first = client.get(f"/api/conversations/{phone}/recommendations", headers=HEADERS).json()
         assert first["has_search"] and first["has_more"]
         first_ids = {p["id"] for p in first["batches"][0]["properties"]}
-        assert len(first_ids) == 3
+        assert len(first_ids) == 5
         assert first["batches"][0]["properties"][0]["photos"][0]["id"] == photo["id"]
         assert client.post(f"/api/test-sessions/{phone}/more-properties", headers=HEADERS).status_code == 202
         asyncio.run(client.app.state.worker.tick())
         more = client.get(f"/api/conversations/{phone}/recommendations", headers=HEADERS).json()
         more_ids = {p["id"] for p in more["batches"][-1]["properties"]}
-        assert len(more_ids) == 5
+        assert len(more_ids) == 3
         assert not (first_ids & more_ids)
         assert not more["has_more"]
         conversation = client.get(f"/api/conversations/{phone}", headers=HEADERS).json()

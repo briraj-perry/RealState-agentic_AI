@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from estate_ai.config import get_settings
 from estate_ai.db import Job, Outbox, connect
+from estate_ai.model_providers import model_status
 from estate_ai.workflows import Worker, enqueue
 
 
@@ -12,13 +13,18 @@ async def main():
     settings = get_settings()
     if settings.whatsapp_mode == "live":
         raise SystemExit("Use simulation mode for the local chat command")
-    if settings.ollama_requires_api_key and not settings.ollama_api_key.get_secret_value():
+    status = model_status(settings)
+    if (
+        status["provider"] == "ollama"
+        and settings.ollama_requires_api_key
+        and not status["model_key_configured"]
+    ):
         raise SystemExit("Set OLLAMA_API_KEY for a remote endpoint, or use local Ollama on port 11434")
     factory = connect(settings.mongodb_uri.get_secret_value(), settings.mongodb_database)
     worker = Worker(factory, settings)
     worker.recover()
     phone = "919000000001"  # Synthetic identity; no external WhatsApp messages are sent.
-    print("Estate AI local chat — Gemma cloud, synthetic buyer. Type /quit to exit.")
+    print("Estate AI local chat — synthetic buyer. Type /quit to exit.")
     while True:
         text = input("You: ").strip()
         if text == "/quit":

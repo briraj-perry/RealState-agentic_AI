@@ -14,13 +14,13 @@ def test_templates_are_fictional_and_seed_is_idempotent(factory, settings):
     with TestClient(create_app(settings, factory)) as client:
         assert client.get("/api/property-templates").status_code == 401
         catalog = client.get("/api/property-templates", headers=HEADERS).json()
-        assert len(catalog) == 500
+        assert len(catalog) == 800
         assert all(row["demo"] for row in catalog)
         assert len({row["city"] for row in catalog}) == 5
         assert {row["bedrooms"] for row in catalog} == {1, 2, 3, 4}
-        assert client.post("/api/demo/seed", headers=HEADERS).json()["created_count"] == 500
+        assert client.post("/api/demo/seed", headers=HEADERS).json()["created_count"] == 800
         assert client.post("/api/demo/seed", headers=HEADERS).json()["created_count"] == 0
-        assert len(client.get("/api/properties", headers=HEADERS).json()) == 500
+        assert len(client.get("/api/properties", headers=HEADERS).json()) == 800
 
 
 def test_demo_can_be_edited_but_not_promoted_to_real(factory, settings):
