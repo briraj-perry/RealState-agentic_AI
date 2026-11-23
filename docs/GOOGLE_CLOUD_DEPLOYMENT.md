@@ -107,6 +107,7 @@ Add **production environment secrets**, privately through GitHub:
 | `MONGODB_URI` | Atlas connection string with the restricted database user's credentials |
 | `ADMIN_API_KEY` | Long random dashboard key |
 | `OLLAMA_API_KEY` | Remote Ollama Cloud API key |
+| `ESTATE_HOSTED_MODEL` | Optional JSON object with `provider`, `model` and `api_key` for the deployment's default hosted model |
 | `WHATSAPP_ACCESS_TOKEN` | Meta token, required in live mode |
 | `WHATSAPP_APP_SECRET` | Meta app secret, required in live mode |
 | `WHATSAPP_VERIFY_TOKEN` | Your random webhook verification secret, needed for Meta callback verification |
@@ -121,9 +122,9 @@ is never an artifact or Docker build input. **This deliberately avoids Secret Ma
 people with sufficient Cloud Run configuration access can view environment values.
 Restrict deploy/admin permissions and rotate credentials after accidental exposure.
 
-Cloud Run cannot reach Ollama on your PC's `localhost`. The cloud defaults use
-[native Ollama Cloud](https://docs.ollama.com/cloud), requiring its API key. Model
-and endpoint remain configurable; another API protocol needs a client adapter.
+Cloud Run uses `ESTATE_HOSTED_MODEL` as its default when configured. Otherwise it uses
+[native Ollama Cloud](https://docs.ollama.com/cloud). A dashboard model selection overrides
+the deployment default on the current instance. **Restore workspace default** returns to the configured model.
 
 ## 4. Deploy and connect WhatsApp
 

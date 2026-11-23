@@ -43,7 +43,8 @@ def read_selection() -> ModelSelection | None:
     try:
         return ModelSelection.model_validate_json(MODEL_FILE.read_bytes())
     except FileNotFoundError:
-        return None
+        deployed = os.environ.get("ESTATE_HOSTED_MODEL")
+        return ModelSelection.model_validate_json(deployed) if deployed else None
 
 
 def save_selection(selection: ModelSelection) -> None:

@@ -28,6 +28,18 @@ def intercept(monkeypatch, handler):
     )
 
 
+def test_hosted_deployment_default_survives_restart_and_reset(selection_file, monkeypatch):
+    monkeypatch.setenv(
+        "ESTATE_HOSTED_MODEL",
+        json.dumps({"provider": "gemini", "model": "gemini-2.5-flash", "api_key": "deployment-key"}),
+    )
+    assert read_selection().model == "gemini-2.5-flash"
+    save_selection(ModelSelection(provider="gemini", model="gemini-other", api_key="override-key"))
+    assert read_selection().model == "gemini-other"
+    selection_file.unlink()
+    assert read_selection().model == "gemini-2.5-flash"
+
+
 def test_validate_and_save_model_without_returning_key(settings, selection_file, monkeypatch):
     def respond(request):
         assert request.headers["x-goog-api-key"] in {"example-key", "invalid-key"}

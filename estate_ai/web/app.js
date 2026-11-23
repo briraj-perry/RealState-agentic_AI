@@ -591,7 +591,7 @@ async function renderSettings(nonce) {
     `<div class="settings-grid"><div class="card-stack"><section class="card"><div class="card-head"><div><h2>AI model</h2><p>Used for new agent replies</p></div>${badge(modelProviders[s.provider],'green')}</div><div class="card-body">
     <div class="settings-rows">${setting('Active model',s.model)}${setting('Background worker',s.worker_enabled?'Enabled':'Disabled')}</div>
     <form id="model-form" class="form-grid">
-      <label class="full-width">Provider<select id="model-provider">${Object.entries(modelProviders).map(([id,name])=>`<option value="${id}" ${id===s.provider?'selected':''}>${esc(name)}</option>`).join('')}</select></label>
+      <label class="full-width">Provider<select id="model-provider">${Object.entries(modelProviders).map(([id,name])=>`<option value="${id}" ${id===s.provider?'selected':''}>${esc(id==='ollama'?'Workspace default':name)}</option>`).join('')}</select></label>
       <div id="hosted-model-fields" class="full-width form-grid">
         <label class="full-width">Model ID<select id="model-id"></select></label>
         <label class="full-width" id="custom-model-field" hidden>Custom model ID<input id="custom-model-id" maxlength="160" autocomplete="off" spellcheck="false"><small>Enter a tool-capable model ID available to your provider account.</small></label>
@@ -636,7 +636,7 @@ async function renderSettings(nonce) {
     key.value='';
     $('#model-key-hint').textContent=reuseKey?'Leave blank to keep the saved key.':'Paste the API key for this provider.';
     saveModel.disabled=ollama&&s.provider==='ollama';
-    saveModel.textContent=ollama?'Use Ollama':'Check and save';
+    saveModel.textContent=ollama?'Restore workspace default':'Check and save';
     result.textContent='';
     result.classList.remove('error-text');
   };
@@ -649,7 +649,7 @@ async function renderSettings(nonce) {
     saveModel.disabled=true;
     provider.disabled=true;
     result.classList.remove('error-text');
-    result.textContent=ollama?'Switching to Ollama…':'Checking the model…';
+    result.textContent=ollama?'Restoring the workspace default…':'Checking the model…';
     try {
       const saved=await api('/settings/model',ollama?{method:'DELETE'}:{method:'PUT',
         body:JSON.stringify({provider:provider.value,

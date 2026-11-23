@@ -60,6 +60,7 @@ jobs:
           MONGODB_DATABASE: ${{ vars.MONGODB_DATABASE || 'estate_ai' }}
           ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
           OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+          ESTATE_HOSTED_MODEL: ${{ secrets.ESTATE_HOSTED_MODEL }}
           WHATSAPP_ACCESS_TOKEN: ${{ secrets.WHATSAPP_ACCESS_TOKEN }}
           WHATSAPP_APP_SECRET: ${{ secrets.WHATSAPP_APP_SECRET }}
           WHATSAPP_VERIFY_TOKEN: ${{ secrets.WHATSAPP_VERIFY_TOKEN }}
@@ -77,6 +78,8 @@ jobs:
                   'OLLAMA_API_KEY', 'WHATSAPP_MODE', 'WHATSAPP_PHONE_NUMBER_ID', 'WHATSAPP_GRAPH_VERSION',
                   'WHATSAPP_ACCESS_TOKEN', 'WHATSAPP_APP_SECRET', 'WHATSAPP_VERIFY_TOKEN']
           config = {key: os.environ.get(key, '') for key in keys}
+          if os.environ.get('ESTATE_HOSTED_MODEL'):
+              config['ESTATE_HOSTED_MODEL'] = os.environ['ESTATE_HOSTED_MODEL']
           demo = os.environ['WHATSAPP_MODE'] == 'simulate' and os.environ['ALLOW_DEMO_DATA'] == 'true'
           config.update(WORKER_ENABLED='true', ALLOW_DEMO_DATA=str(demo).lower())
           path = Path(os.environ['RUNNER_TEMP']) / 'estate-runtime.json'
