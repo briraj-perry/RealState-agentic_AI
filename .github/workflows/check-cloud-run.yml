@@ -1,0 +1,34 @@
+name: Check Cloud Run availability
+
+on: workflow_dispatch
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      PROJECT: ${{ vars.GCP_PROJECT_ID }}
+      REGION: ${{ vars.GCP_REGION || 'asia-south1' }}
+      SERVICE: ${{ vars.CLOUD_RUN_SERVICE || 'estate-ai' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT }}
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.DEPLOY_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Read service conditions
+        run: |
+          gcloud run services describe "$SERVICE" --project="$PROJECT" --region="$REGION" \
+            --format='yaml(status.conditions,status.latestReadyRevisionName,status.traffic)'
+      - name: Check project billing link
+        run: gcloud billing projects describe "$PROJECT" --format='value(billingEnabled)'
+      - name: Read recent platform errors
+        if: always()
+        run: |
+          gcloud logging read "resource.type=cloud_run_revision AND resource.labels.service_name=\"$SERVICE\" AND severity>=ERROR" \
+            --project="$PROJECT" --freshness=3d --limit=10 --format='table(timestamp,severity,httpRequest.status,logName)'
