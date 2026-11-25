@@ -25,6 +25,44 @@ jobs:
         run: |
           gcloud run services describe "$SERVICE" --project="$PROJECT" --region="$REGION" \
             --format='yaml(status.conditions,status.latestReadyRevisionName,status.traffic)'
+      - name: Read scaling and instance counts
+        run: |
+          python - <<'PYTHON'
+          import json
+          import os
+          import subprocess
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+          from datetime import datetime, timedelta, timezone
+
+          project, region, service = (os.environ[k] for k in ("PROJECT", "REGION", "SERVICE"))
+          token = subprocess.check_output(["gcloud", "auth", "print-access-token"], text=True).strip()
+
+          def read(url, params):
+              request = urllib.request.Request(url + "?" + urllib.parse.urlencode(params),
+                                               headers={"Authorization": "Bearer " + token})
+              with urllib.request.urlopen(request, timeout=20) as response:
+                  return json.load(response)
+
+          url = f"https://run.googleapis.com/v2/projects/{project}/locations/{region}/services/{service}"
+          print(read(url, {"fields": "scaling,template/scaling,ingress,defaultUriDisabled,invokerIamDisabled,urls"}))
+          now = datetime.now(timezone.utc)
+          try:
+              data = read(f"https://monitoring.googleapis.com/v3/projects/{project}/timeSeries", {
+                  "filter": f'metric.type="run.googleapis.com/container/instance_count" AND resource.labels.service_name="{service}" AND resource.labels.location="{region}"',
+                  "interval.startTime": (now - timedelta(minutes=30)).isoformat(),
+                  "interval.endTime": now.isoformat(),
+              })
+          except urllib.error.HTTPError as exc:
+              print("Instance count unavailable, HTTP", exc.code)
+          else:
+              series = data.get("timeSeries", [])
+              if not series:
+                  print("No instance-count samples in the last 30 minutes")
+              for entry in series:
+                  print(entry["resource"]["labels"]["revision_name"], entry["metric"]["labels"], entry["points"][:1])
+          PYTHON
       - name: Check project billing link
         run: gcloud billing projects describe "$PROJECT" --format='value(billingEnabled)'
       - name: Read recent platform errors
