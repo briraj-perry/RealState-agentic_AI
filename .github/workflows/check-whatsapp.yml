@@ -1,0 +1,38 @@
+name: Check WhatsApp sender
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Check Meta token and test sender
+        env:
+          ACCESS_TOKEN: ${{ secrets.WHATSAPP_ACCESS_TOKEN }}
+          PHONE_ID: ${{ vars.WHATSAPP_PHONE_NUMBER_ID }}
+          GRAPH_VERSION: ${{ vars.WHATSAPP_GRAPH_VERSION }}
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request, urllib.error
+          token = os.environ["ACCESS_TOKEN"]
+          print("Token has surrounding whitespace:", token != token.strip())
+          req = urllib.request.Request(
+              "https://graph.facebook.com/" + os.environ["GRAPH_VERSION"] + "/" + os.environ["PHONE_ID"]
+              + "?fields=id,code_verification_status,platform_type",
+              headers={"Authorization": "Bearer " + token.strip()},
+          )
+          try:
+              with urllib.request.urlopen(req, timeout=20) as resp:
+                  data = json.load(resp)
+                  print("Sender matches:", data.get("id") == os.environ["PHONE_ID"])
+                  print("Verification:", data.get("code_verification_status"), "Platform:", data.get("platform_type"))
+          except urllib.error.HTTPError as exc:
+              err = json.load(exc).get("error", {})
+              print("Meta HTTP", exc.code, "code", err.get("code"), "subcode", err.get("error_subcode"))
+              msg = err.get("message", "").lower()
+              for reason in ("expired", "cannot parse access token", "invalid oauth access token", "missing permissions", "unsupported get request"):
+                  if reason in msg:
+                      print(reason)
+              raise SystemExit(1)
+          PY
