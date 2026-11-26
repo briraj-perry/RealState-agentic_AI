@@ -52,6 +52,7 @@ class Customer(Record):
     collection, pk = "customers", "phone"
     phone, name = Field(), Field("")
     paused, opted_out, last_inbound = Field(False), Field(False), Field(0)
+    interest_property_id = Field("")
 
 
 class Message(Record):
@@ -125,6 +126,7 @@ class Outbox(Record):
     collection = "outbox"
     id, phone, body, channel = Field(), Field(), Field(), Field()
     sender = Field("ai")
+    template = Field(None)
     state, provider_id, error, created = Field("pending"), Field(""), Field(""), Field(now)
 
 
@@ -249,8 +251,9 @@ class MongoUnitOfWork:
         document = self.factory.database[record.collection].find_one({"_id": key[1]})
         if not document:
             raise ConcurrentWriteError("Document was removed")
-        for name in record.fields():
-            setattr(record, name, document[name])
+        stored = type(record)(**{k: v for k, v in document.items() if k in record.fields()})
+        for name, value in stored.values().items():
+            setattr(record, name, value)
         self.originals[key] = copy.deepcopy(record.values())
         self.revisions[key] = document["_revision"]
         for name, value in changes.items():

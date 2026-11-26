@@ -21,7 +21,7 @@ const modelPresets = {
   anthropic: ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5'],
   openai: ['gpt-5.4-mini', 'gpt-5.6-terra', 'gpt-6-astra'],
 };
-const pages = {overview:'Overview', properties:'Properties', portal:'Test listing portal', conversations:'Conversations', test:'Test Your Agent', settings:'Settings'};
+const pages = {overview:'Overview', properties:'Properties', portal:'Listing portal', conversations:'Conversations', test:'Test Your Agent', settings:'Settings'};
 const state = {key:sessionStorage.getItem('estate-admin') || '', status:null, page:'overview', nonce:0,
   properties:[], templates:[], propertyFilter:'all', customers:[], selectedPhone:null, conversationTab:'messages', overviewSnapshot:null,
   testPhone:sessionStorage.getItem('estate-test-phone'), testSessions:[], pending:{}, timer:null};
@@ -220,30 +220,41 @@ function paintTemplates() {
   document.querySelectorAll('[data-template]').forEach(b=>b.addEventListener('click',()=>{if(!state.status.demo_inventory_allowed||state.status.whatsapp_mode==='live'){toast('Demo templates require ALLOW_DEMO_DATA=true and simulation mode.');return;}const p=state.templates.find(p=>p.id===b.dataset.template);$('#template-dialog').close();const details={...p.details};delete details.housing_listing_id;openProperty({...p,details,id:p.id+'-'+crypto.randomUUID().slice(0,5),asking_price_inr:p.asking_price},true);}));
 }
 async function renderPortal(nonce) {
-  if(state.status.whatsapp_mode==='live'||!state.status.demo_inventory_allowed){
+  const live=state.status.whatsapp_mode==='live';
+  if(live&&!state.status.whatsapp_interest_enabled){
+    $('#content').innerHTML=heading('Listing portal','Configure an approved WhatsApp enquiry template to enable messaging.');
+    return;
+  }
+  if(!live&&!state.status.demo_inventory_allowed){
     $('#content').innerHTML=heading('Test listing portal','Enable demo inventory in simulation mode to try a buyer enquiry.');
     return;
   }
-  const listings=await api('/property-templates');
+  const listings=live
+    ? (await api('/properties')).filter(home=>home.available&&!home.demo)
+    : await api('/property-templates');
   if(nonce!==state.nonce)return;
-  $('#content').innerHTML=heading('Biba listings','Choose a fictional home to test a buyer enquiry.')+
+  $('#content').innerHTML=heading('Biba listings',live?'Choose a property to enquire about on WhatsApp.':'Choose a fictional home to test a buyer enquiry.')+
     `<section class="card"><div class="card-body"><form class="form-grid" id="portal-form">
-    <label>Buyer name<input name="buyer" required maxlength="80" autocomplete="off"></label>
+    <label>Buyer name<input name="buyer" required maxlength="80" autocomplete="name"></label>
+    ${live?`<label>WhatsApp number<input name="phone" type="tel" required maxlength="40" autocomplete="tel" placeholder="+91 98765 43210"></label>`:''}
     <label>Search listings<input name="search" type="search" placeholder="City, locality or listing ID"></label>
     <label class="full-width">Property<select name="listing" required></select></label>
+    ${live?`<label class="check-label full-width"><input name="consent" type="checkbox" required> I agree to receive a WhatsApp message from ${esc(state.status.business_name)} about this property.</label>`:''}
     <p class="full-width" id="portal-details"></p><button class="button primary" type="submit">I’m interested</button>
     <p role="status" id="portal-status"></p></form></div></section>`;
   const form=$('#portal-form'), fields=form.elements;
+  const status=$('#portal-status');
+  let submitting=false, submission;
   const preview=()=>{
     const home=listings.find(item=>item.id===fields.listing.value);
     $('#portal-details').textContent=home?home.description:'No matching listings.';
-    form.querySelector('button').disabled=!home;
+    form.querySelector('button').disabled=submitting||!home;
   };
   const filter=()=>{
     const query=fields.search.value.trim().toLowerCase();
     const matches=listings.filter(home=>[home.city,home.locality,home.title,home.id].join(' ').toLowerCase().includes(query));
     fields.listing.replaceChildren(...matches.map(home=>new Option(
-      home.title+' · '+home.locality+', '+home.city+' · '+price(home.asking_price),home.id)));
+      home.title+' · '+home.locality+', '+home.city+' · '+price(home.asking_price_inr??home.asking_price),home.id)));
     preview();
   };
   fields.search.addEventListener('input',filter);
@@ -251,10 +262,26 @@ async function renderPortal(nonce) {
   filter();
   form.addEventListener('submit',async event=>{
     event.preventDefault();
+    if(submitting||!fields.listing.value)return;
     const buyer=fields.buyer.value.trim();
-    if(!buyer){$('#portal-status').textContent='Enter a buyer name.';return;}
-    form.querySelector('button').disabled=true;
+    if(!buyer){status.textContent='Enter a buyer name.';return;}
+    submitting=true;
+    preview();
+    status.textContent='';
     try {
+      if(live){
+        const payload={buyer_name:buyer,phone:fields.phone.value.trim(),property_id:fields.listing.value,whatsapp_consent:fields.consent.checked};
+        const signature=JSON.stringify(payload);
+        if(submission?.signature!==signature)submission={signature,id:crypto.randomUUID()};
+        const result=await api('/property-interests',{method:'POST',body:JSON.stringify({...payload,event_id:submission.id})});
+        if(nonce!==state.nonce)return;
+        status.textContent=['pending','sending'].includes(result.state)?'WhatsApp message queued.':deliveryLabel(result.state)+'.';
+        status.insertAdjacentHTML('beforeend',' '+buyerLink(payload.phone.replace(/[\s()+-]/g,''),'View conversation'));
+        openBuyerLinks();
+        submission=undefined;
+        fields.consent.checked=false;
+        return;
+      }
       const session=await api('/test-sessions',{method:'POST',body:JSON.stringify({
         name:buyer+' · '+fields.listing.value,buyer_name:buyer,property_id:fields.listing.value,portal_interest:true
       })});
@@ -262,7 +289,10 @@ async function renderPortal(nonce) {
       sessionStorage.setItem('estate-test-phone',session.phone);
       location.hash='test';
     } catch(error){
-      if(nonce===state.nonce){$('#portal-status').textContent=error.message;preview();}
+      if(nonce===state.nonce)status.textContent=error.message;
+    } finally {
+      submitting=false;
+      if(nonce===state.nonce)preview();
     }
   });
 }
@@ -418,7 +448,7 @@ function activityView(rows) {
   return relevant.length?relevant.map(a=>`<div class="activity"><strong>${esc(a.action.replaceAll('_',' '))}</strong><p>${esc(date(a.created))}</p>${a.action==='dealer_alert'?handoffView(a.detail):['opt_out','human_takeover','automation_resumed'].includes(a.action)?`<p>${esc(a.detail)}</p>`:''}</div>`).join(''):'<p class="muted text-small">Tool calls and handoffs will appear here as the agent works.</p>';
 }
 function deliveryLabel(value) {
-  return ({pending:'Queued',sending:'Sending',simulated:'Simulated · stays in app',accepted:'Accepted by WhatsApp',sent:'Sent',delivered:'Delivered',read:'Read',delivery_unknown:'Delivery uncertain · review before retrying',suppressed:'Not sent'})[value]||value;
+  return ({pending:'Queued',sending:'Sending',simulated:'Simulated · stays in app',accepted:'Accepted by WhatsApp',sent:'Sent',delivered:'Delivered',read:'Read',failed:'WhatsApp delivery failed',delivery_unknown:'Delivery uncertain · review before retrying',suppressed:'Not sent'})[value]||value;
 }
 async function paintConversation(nonce) {
   const customer=state.customers.find(c=>c.phone===state.selectedPhone);

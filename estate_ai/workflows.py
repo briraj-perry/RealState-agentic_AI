@@ -191,12 +191,16 @@ class Worker:
             )
             if not item:
                 return
-            customer = session.get(Customer, item.phone)
-            # Even simulated messages respect opt-outs and the inbound service window.
+            customer = (
+                session.scalar(select(Customer).where(Customer.phone == item.phone).with_for_update())
+                if item.template
+                else session.get(Customer, item.phone)
+            )
+            # Approved templates can initiate a conversation before the first inbound message.
             if (
                 customer.opted_out
                 or (customer.paused and item.sender != "human")
-                or now() - customer.last_inbound >= 86400
+                or (not item.template and now() - customer.last_inbound >= 86400)
                 or (session.get(TestSession, item.phone) and item.channel != "simulate")
             ):
                 item.state = "suppressed"
@@ -214,7 +218,10 @@ class Worker:
             item.state = "sending"
             session.commit()
             try:
-                item.provider_id = await self.whatsapp.send(item.phone, item.body)
+                if item.template:
+                    item.provider_id = await self.whatsapp.send_template(item.phone, item.template)
+                else:
+                    item.provider_id = await self.whatsapp.send(item.phone, item.body)
                 item.state = "accepted"  # Provider accepted; not proof of delivery.
             except Exception as exc:  # noqa: BLE001 - Any transport failure can have an ambiguous side effect.
                 # A timeout may mean Meta accepted the message. Never blindly resend.

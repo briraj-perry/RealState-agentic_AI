@@ -395,11 +395,8 @@ def register_dashboard(app, settings, admin):
                 elif human_delivery and human_delivery.state in {"pending", "sending"}:
                     followup_status = "reply_queued"
             test_context = session.get(TestSession, row.phone)
-            interested = (
-                session.get(Property, test_context.property_id)
-                if (test_context and test_context.property_id)
-                else None
-            )
+            property_id = test_context.property_id if test_context else row.interest_property_id
+            interested = session.get(Property, property_id) if property_id else None
             preferences = {}
             evidence = []
             for audit in session.scalars(

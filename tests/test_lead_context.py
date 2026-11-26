@@ -1,10 +1,12 @@
 import json
+from uuid import uuid4
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from estate_ai.agent import EstateAgent
-from estate_ai.db import Message, Outbox, Property
+from estate_ai.db import Customer, Message, Outbox, Property
 from estate_ai.document_query import select
 from estate_ai.main import create_app
 from estate_ai.property_templates import templates
@@ -193,3 +195,94 @@ async def test_portal_interest_then_budget_then_yes(factory, settings):
             "kind": "budget",
             "property_id": item["id"],
         }
+
+
+@pytest.mark.asyncio
+async def test_live_portal_sends_one_template_before_buyer_replies(factory, settings, monkeypatch):
+    settings.whatsapp_mode = "live"
+    settings.allow_demo_data = False
+    settings.whatsapp_interest_template = "property_enquiry"
+    settings.whatsapp_interest_template_language = "en_US"
+    settings.whatsapp_phone_number_id = "123"
+    settings.whatsapp_graph_version = "v26.0"
+    event = {
+        "event_id": str(uuid4()),
+        "phone": "+91 98765 43210",
+        "buyer_name": "Sam",
+        "property_id": "home-1",
+        "whatsapp_consent": True,
+    }
+    phone = "919876543210"
+    with factory() as session:
+        session.add(
+            Property(id="home-1", title="Sector 70 flat", city="Mohali", bedrooms=3, asking_price=8500000)
+        )
+        session.add(
+            Property(id="demo", title="Demo flat", city="Mohali", bedrooms=3, asking_price=8500000, demo=True)
+        )
+        session.commit()
+    with TestClient(create_app(settings, factory)) as client:
+        path = "/api/property-interests"
+        assert client.post(path, json=event).status_code == 401
+        assert (
+            client.post(path, json={**event, "whatsapp_consent": False}, headers=HEADERS).status_code == 422
+        )
+        assert client.post(path, json={**event, "property_id": "demo"}, headers=HEADERS).status_code == 404
+        queued = client.post(path, json=event, headers=HEADERS)
+        assert queued.status_code == 202
+        assert queued.json()["state"] == "pending"
+        assert client.post(path, json=event, headers=HEADERS).json() == queued.json()
+        assert client.post(path, json={**event, "buyer_name": "Lee"}, headers=HEADERS).status_code == 409
+        cancelled = client.post(
+            path, json={**event, "event_id": str(uuid4()), "phone": "919876543211"}, headers=HEADERS
+        ).json()["event_id"]
+    assert enqueue(factory, "wa:stop", "919876543211", "STOP", "whatsapp")
+
+    requests = []
+
+    def send(request):
+        requests.append(json.loads(request.content))
+        assert request.url.path == "/v26.0/123/messages"
+        return httpx.Response(200, json={"messages": [{"id": "wamid.interest"}]})
+
+    worker = Worker(factory, settings)
+    async_client = httpx.AsyncClient
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            httpx,
+            "AsyncClient",
+            lambda **options: async_client(transport=httpx.MockTransport(send), **options),
+        )
+        await worker.send_one()
+        await worker.send_one()
+        await worker.send_one()
+
+    (sent,) = requests
+    assert sent["to"] == phone and sent["type"] == "template"
+    assert sent["template"]["language"] == {"code": "en_US"}
+    assert sent["template"]["name"] == "property_enquiry"
+    assert [p["text"] for p in sent["template"]["components"][0]["parameters"]] == [
+        "Sam",
+        settings.business_name,
+        "Sector 70 flat",
+    ]
+    with factory() as session:
+        assert session.get(Customer, phone).last_inbound == 0
+        assert session.get(Customer, phone).interest_property_id == "home-1"
+        item = session.get(Outbox, queued.json()["event_id"])
+        assert (item.state, item.provider_id) == ("accepted", "wamid.interest")
+        assert session.get(Outbox, cancelled).state == "suppressed"
+
+    class FollowupModel:
+        async def chat(self, messages, tools):
+            context = next(json.loads(m["content"])["lead_context"] for m in messages if m["role"] == "tool")
+            assert context["buyer_name"] == "Sam"
+            assert context["property"]["id"] == "home-1"
+            return {"role": "assistant", "content": "The Sector 70 flat is listed at ₹85 lakh."}
+
+    assert enqueue(factory, "wa:followup", phone, "How much is it?", "whatsapp")
+    await Worker(factory, settings, agent=EstateAgent(settings, FollowupModel())).process_one()
+    with factory() as session:
+        followup = session.get(Outbox, "wa:followup")
+        assert followup.body == "The Sector 70 flat is listed at ₹85 lakh."
+        assert followup.template is None

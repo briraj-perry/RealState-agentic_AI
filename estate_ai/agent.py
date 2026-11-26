@@ -82,25 +82,27 @@ class EstateAgent:
             )
         )
         test_session = session.get(TestSession, phone)
+        interested_property_id = service.interested_property_id()
         lead_context = None
-        if test_session and test_session.property_id:
+        if interested_property_id:
             try:
-                listing = service.get_property_details(PropertyArgs(property_id=test_session.property_id))
+                listing = service.get_property_details(PropertyArgs(property_id=interested_property_id))
             except ValueError:
                 service.request_human_handoff(
                     HandoffArgs(reason="Interested property is no longer accessible")
                 )
                 return f"I'll ask the {business} team to check this property's details. Automated replies are paused."
             lead_context = {
-                "buyer_name": test_session.buyer_name,
+                "buyer_name": test_session.buyer_name if test_session else session.get(Customer, phone).name,
                 "company": business,
-                "source": test_session.source,
-                "listing_id": test_session.listing_id,
+                "source": test_session.source if test_session else "Biba listing portal",
+                "listing_id": test_session.listing_id if test_session else interested_property_id,
                 "property": listing,
             }
             first_reply = not any(m.role == "assistant" and m.id != f"welcome:{phone}" for m in history)
             if (
-                first_reply
+                test_session
+                and first_reply
                 and not style
                 and source.content.strip().casefold().rstrip(".!?")
                 in {
@@ -374,7 +376,7 @@ Previously retrieved property results and filters (not proof the buyer liked the
                                     {
                                         "function": {
                                             "name": "get_property_details",
-                                            "arguments": {"property_id": test_session.property_id},
+                                            "arguments": {"property_id": interested_property_id},
                                         }
                                     }
                                 ],

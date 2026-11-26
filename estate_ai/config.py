@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     whatsapp_app_secret: SecretStr = SecretStr("")
     whatsapp_verify_token: SecretStr = SecretStr("")
     whatsapp_graph_version: str = Field(default="", pattern=r"^(v\d+\.\d+)?$")
+    whatsapp_interest_template: str = Field(default="", pattern=r"^[a-z0-9_]*$", max_length=512)
+    whatsapp_interest_template_language: str = Field(default="en", pattern=r"^[a-z]{2,3}(?:_[A-Z]{2})?$")
     worker_enabled: bool = True
 
     @field_validator("ollama_base_url")

@@ -157,6 +157,13 @@ class ToolService:
             raise ValueError("Property not found")
         return row
 
+    def interested_property_id(self) -> str:
+        test = self.session.get(TestSession, self.phone)
+        if test:
+            return test.property_id
+        customer = self.session.get(Customer, self.phone)
+        return customer.interest_property_id if customer else ""
+
     def execute(self, name: str, arguments: dict) -> dict:
         if name not in TOOL_SPECS:
             return {"error": "Unknown tool"}
@@ -227,8 +234,7 @@ class ToolService:
         return property_data(self.property(args.property_id))
 
     def related_candidates(self, args: RelatedArgs):
-        context = self.session.get(TestSession, self.phone)
-        property_id = args.property_id or (context.property_id if context else "")
+        property_id = args.property_id or self.interested_property_id()
         if not property_id:
             raise ValueError("Choose a property first so I can find related homes")
         anchor = self.property(property_id)
@@ -432,8 +438,7 @@ class ToolService:
     def budget_shortlist(self, proposal):
         data = json.loads(proposal.payload)
         budget = data["amount_inr"]
-        context = self.session.get(TestSession, self.phone)
-        selected = context.property_id if context else ""
+        selected = self.interested_property_id()
         mentioned = data.get("property_id")
         if (
             mentioned
@@ -574,7 +579,8 @@ class ToolService:
         return self.proposal("visit", args.model_dump(mode="json"))
 
     def request_human_handoff(self, args: HandoffArgs):
-        self.session.get(Customer, self.phone).paused = True
+        customer = self.session.get(Customer, self.phone)
+        customer.paused = True
         test = self.session.get(TestSession, self.phone)
         messages = list(
             self.session.scalars(
@@ -602,8 +608,8 @@ class ToolService:
         )
         summary = {
             "reason": args.reason,
-            "buyer_name": self.session.get(Customer, self.phone).name,
-            "property_id": test.property_id if test else "",
+            "buyer_name": customer.name,
+            "property_id": test.property_id if test else customer.interest_property_id,
             "listing_id": test.listing_id if test else "",
             "preferences_with_evidence": [json.loads(p) for p in preferences],
             "proposals": [

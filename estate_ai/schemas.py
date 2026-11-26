@@ -1,6 +1,7 @@
 import re
 from datetime import date, datetime, timedelta
 from typing import Literal
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -37,6 +38,21 @@ class ChatInput(StrictModel):
     event_id: str = Field(min_length=1, max_length=150, pattern=r"^[A-Za-z0-9_.:+=/-]+$")
 
     _phone = field_validator("phone")(normalize_phone)
+
+
+class PropertyInterestInput(StrictModel):
+    event_id: UUID
+    property_id: str = Field(min_length=1, max_length=64)
+    buyer_name: str = Field(min_length=1, max_length=80)
+    phone: str = Field(max_length=40)
+    whatsapp_consent: Literal[True]
+
+    _phone = field_validator("phone")(normalize_phone)
+
+    @field_validator("buyer_name", mode="before")
+    @classmethod
+    def clean_buyer_name(cls, value):
+        return " ".join(value.split()) if isinstance(value, str) else value
 
 
 class PropertyInput(StrictModel):

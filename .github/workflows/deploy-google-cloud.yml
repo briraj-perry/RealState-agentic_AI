@@ -38,6 +38,8 @@ jobs:
       ALLOW_DEMO_DATA: ${{ vars.ALLOW_DEMO_DATA || 'false' }}
       WHATSAPP_PHONE_NUMBER_ID: ${{ vars.WHATSAPP_PHONE_NUMBER_ID }}
       WHATSAPP_GRAPH_VERSION: ${{ vars.WHATSAPP_GRAPH_VERSION }}
+      WHATSAPP_INTEREST_TEMPLATE: ${{ vars.WHATSAPP_INTEREST_TEMPLATE }}
+      WHATSAPP_INTEREST_TEMPLATE_LANGUAGE: ${{ vars.WHATSAPP_INTEREST_TEMPLATE_LANGUAGE || 'en' }}
     steps:
       - uses: actions/checkout@v4
       - name: Validate configuration
@@ -76,7 +78,8 @@ jobs:
               raise SystemExit('Missing GitHub production secrets: ' + ', '.join(missing))
           keys = ['BUSINESS_NAME', 'MONGODB_URI', 'MONGODB_DATABASE', 'ADMIN_API_KEY', 'OLLAMA_BASE_URL', 'OLLAMA_MODEL',
                   'OLLAMA_API_KEY', 'WHATSAPP_MODE', 'WHATSAPP_PHONE_NUMBER_ID', 'WHATSAPP_GRAPH_VERSION',
-                  'WHATSAPP_ACCESS_TOKEN', 'WHATSAPP_APP_SECRET', 'WHATSAPP_VERIFY_TOKEN']
+                  'WHATSAPP_ACCESS_TOKEN', 'WHATSAPP_APP_SECRET', 'WHATSAPP_VERIFY_TOKEN',
+                  'WHATSAPP_INTEREST_TEMPLATE', 'WHATSAPP_INTEREST_TEMPLATE_LANGUAGE']
           config = {key: os.environ.get(key, '') for key in keys}
           if os.environ.get('ESTATE_HOSTED_MODEL'):
               config['ESTATE_HOSTED_MODEL'] = os.environ['ESTATE_HOSTED_MODEL']

@@ -44,6 +44,20 @@ platform notifications are not automatically imported.
 10. Inspect `GET /api/status`, `/api/jobs`, `/api/conversations/<international-digits>` and `/api/alerts`
     with your admin key. Check the actual WhatsApp reply and delivery-status callbacks.
 
+## Send the first message from the listing portal
+
+In WhatsApp Manager, submit a template for approval with three positional body variables in this order: buyer name, business name and property title.
+
+```text
+Hi {{1}}, I’m the AI assistant for {{2}}. Thanks for your enquiry about {{3}}. Reply here if you’d like more details.
+```
+
+Set `WHATSAPP_INTEREST_TEMPLATE` to the approved template name and `WHATSAPP_INTEREST_TEMPLATE_LANGUAGE` to its exact language code, such as `en`. Use the local `.env` or the GitHub `production` environment variables for Cloud Run.
+
+Open **Listing portal** in the authenticated workspace, select an available property, enter the buyer’s WhatsApp number with country code, and record their consent. **I’m interested** queues the template. Open **Conversations** to check its delivery status and see the buyer’s replies. For Meta’s test sender, use a verified test recipient.
+
+WhatsApp requires an approved template to open the conversation. The buyer’s reply opens the 24-hour window for the agent’s free-form responses. [WhatsApp Business Messaging Policy](https://business.whatsapp.com/policy)
+
 Test the following before letting real buyers use it:
 
 - Ask for a listing that exists; then ask for an unavailable one.
@@ -67,7 +81,7 @@ Troubleshooting:
 
 Use a suitable business token lifecycle and business onboarding before moving beyond the test number.
 Check current WhatsApp policies and account eligibility before production or proactive outreach.
-Calendar OAuth, templates, lead-source APIs and Business App coexistence are separate follow-up work.
+Calendar OAuth, external lead-source APIs and Business App coexistence are separate follow-up work.
 
 Official starting points: [Meta WhatsApp docs](https://developers.facebook.com/docs/whatsapp/cloud-api/),
 [WhatsApp developer hub](https://business.whatsapp.com/developers/developer-hub),

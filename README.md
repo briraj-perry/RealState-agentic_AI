@@ -17,6 +17,7 @@ Implemented:
 - Persistent conversation history, inbox/outbox, duplicate inbound-event protection,
   bounded agent retries, WhatsApp signature verification and delivery-status callbacks.
 - Immediate STOP handling, human takeover, service-window checks and dealer alerts through the API.
+- The workspace listing portal can send an approved WhatsApp template when a buyer opts in about an available property. [WhatsApp setup](docs/WHATSAPP_SETUP.md)
 - Local real-model chat and an authenticated API simulator. Simulation NEVER sends WhatsApp messages.
 - A responsive five-page dashboard: Overview, Properties, Conversations, Test Your Agent and Settings.
   Saved test conversations exercise the same real agent and tool services as WhatsApp.
@@ -25,8 +26,8 @@ Implemented:
 - Excel inventory imports with worksheet/header selection, automatic column suggestions, editable
   mapping, row validation, INR/lakh/crore conversion and explicit create/update review.
 
-**Not connected or implemented yet:** Google Calendar booking/OAuth, lead-platform ingestion,
-outbound templates/campaigns, voice notes/calls, WhatsApp photo/media sending,
+**Not connected or implemented yet:** Google Calendar booking/OAuth, external lead-platform ingestion,
+outbound campaigns, voice notes/calls, WhatsApp photo/media sending,
 multi-tenant authorization, database migrations and automated follow-ups.
 Site visits are **requests pending dealer approval**, never confirmed bookings.
 Dealer alerts are stored for retrieval via `/api/alerts`; they are not push notifications.

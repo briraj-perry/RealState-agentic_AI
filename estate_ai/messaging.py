@@ -6,6 +6,12 @@ class WhatsAppClient:
         self.settings = settings
 
     async def send(self, phone: str, text: str) -> str:
+        return await self._send(phone, "text", {"preview_url": False, "body": text})
+
+    async def send_template(self, phone: str, template: dict) -> str:
+        return await self._send(phone, "template", template)
+
+    async def _send(self, phone: str, message_type: str, content: dict) -> str:
         s = self.settings
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.post(
@@ -15,8 +21,8 @@ class WhatsAppClient:
                     "messaging_product": "whatsapp",
                     "recipient_type": "individual",
                     "to": phone,
-                    "type": "text",
-                    "text": {"preview_url": False, "body": text},
+                    "type": message_type,
+                    message_type: content,
                 },
             )
             response.raise_for_status()

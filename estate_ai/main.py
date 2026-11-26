@@ -31,7 +31,7 @@ from estate_ai.inventory_import import register_inventory_import
 from estate_ai.model_providers import model_status
 from estate_ai.photos import register_photos
 from estate_ai.property_templates import seed_demo_inventory, templates
-from estate_ai.schemas import ChatInput, PropertyInput, normalize_phone
+from estate_ai.schemas import ChatInput, PropertyInput, PropertyInterestInput, normalize_phone
 from estate_ai.tools import property_data
 from estate_ai.workflows import Worker, enqueue
 
@@ -97,6 +97,8 @@ def create_app(settings=None, factory=None, agent=None, whatsapp=None):
             "ollama_base_url": settings.ollama_base_url,
             "ollama_api_key_required": settings.ollama_requires_api_key,
             "whatsapp_mode": settings.whatsapp_mode,
+            "whatsapp_interest_enabled": settings.whatsapp_mode == "live"
+            and bool(settings.whatsapp_interest_template),
             "calendar": "apple_calendar" if apple_calendar.available() else "not_connected",
             "worker_enabled": settings.worker_enabled,
             "demo_inventory_allowed": settings.allow_demo_data,
@@ -122,6 +124,55 @@ def create_app(settings=None, factory=None, agent=None, whatsapp=None):
         key = f"sim:{body.event_id}"
         accepted = enqueue(request.app.state.factory, key, body.phone, body.text, "simulate")
         return {"event_id": key, "accepted": accepted}
+
+    @app.post("/api/property-interests", status_code=202, dependencies=[Depends(admin)])
+    def property_interest(body: PropertyInterestInput, request: Request):
+        if settings.whatsapp_mode != "live" or not settings.whatsapp_interest_template:
+            raise HTTPException(409, "Live WhatsApp enquiries require a configured message template")
+        key = f"interest:{body.event_id}"
+        detail = json.dumps(
+            {"buyer_name": body.buyer_name, "property_id": body.property_id, "whatsapp_consent": True}
+        )
+        with request.app.state.factory() as session:
+            existing = session.get(Outbox, key)
+            if existing:
+                if existing.phone != body.phone or session.get(Audit, key).detail != detail:
+                    raise HTTPException(409, "This enquiry ID was already used for a different submission")
+                return {"event_id": key, "state": existing.state}
+            home = session.get(Property, body.property_id)
+            if not home or home.demo or not home.available:
+                raise HTTPException(404, "Choose an available live listing")
+            customer = session.scalar(select(Customer).where(Customer.phone == body.phone).with_for_update())
+            if session.get(TestSession, body.phone) or (customer and (customer.opted_out or customer.paused)):
+                raise HTTPException(409, "This contact cannot receive an automated WhatsApp message")
+            if customer is None:
+                customer = Customer(phone=body.phone)
+                session.add(customer)
+            customer.name = body.buyer_name
+            customer.interest_property_id = home.id
+            name, company, listing = (
+                " ".join(value.split())
+                for value in (body.buyer_name, company_name(session, settings), home.title)
+            )
+            text = (
+                f"Hi {name}, I’m the AI assistant for {company}. "
+                f"Thanks for your enquiry about {listing}. Reply here if you’d like more details."
+            )
+            template = {
+                "name": settings.whatsapp_interest_template,
+                "language": {"code": settings.whatsapp_interest_template_language},
+                "components": [
+                    {
+                        "type": "body",
+                        "parameters": [{"type": "text", "text": value} for value in (name, company, listing)],
+                    }
+                ],
+            }
+            session.add(Audit(id=key, phone=body.phone, action="lead_context", detail=detail))
+            session.add(Message(id=f"reply:{key}", phone=body.phone, role="assistant", content=text))
+            session.add(Outbox(id=key, phone=body.phone, channel="whatsapp", body=text, template=template))
+            session.commit()
+            return {"event_id": key, "state": "pending"}
 
     @app.get("/api/jobs", dependencies=[Depends(admin)])
     def jobs(request: Request):
